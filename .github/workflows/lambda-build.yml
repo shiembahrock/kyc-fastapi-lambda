@@ -2,20 +2,26 @@ name: Build Lambda Package
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout source
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Upgrade pip
+        run: |
+          python -m pip install --upgrade pip
 
       - name: Install dependencies
         run: |
@@ -26,13 +32,13 @@ jobs:
         run: |
           cp *.py build/
 
-      - name: Zip lambda package
+      - name: Zip Lambda package
         run: |
           cd build
           zip -r ../lambda.zip .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: lambda-package
           path: lambda.zip
