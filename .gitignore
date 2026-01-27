@@ -1,0 +1,51 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+
+# Virtual env
+.buildvenv/
+venv/
+.env
+.env.local
+
+# Lambda build artifacts
+lambda-deployment/
+package/
+
+# OS
+.DS_Store
+
+
+# Local / testing scripts
+check_*.py
+*_seed.py
+event.json
+orders.json
+
+# Node / frontend leftovers
+package-lock.json
+
+# Dev-only / local config
+requirement-dev.txt
+Dockerfile
+
+# Accidental vendored libs
+typing_extensions.py
+
+# Environment files
+.env
+.env.local
+.env.example
