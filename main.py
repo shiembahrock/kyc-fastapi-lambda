@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, APIRouter, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from typing import Optional
@@ -30,15 +30,17 @@ router = APIRouter()
 
 @router.get("/check-db")
 def check_db():
-    db_url = os.getenv("DATABASE_URL")
-    if not db_url:
-        return {"status": "error", "message": "DATABASE_URL not set in Lambda environment"}
+    # db_url = os.getenv("DATABASE_URL")
+    # if not db_url:
+    #     return {"status": "error", "message": "DATABASE_URL not set in Lambda environment"}
+    conn_string = os.getenv("CONN_STRING")
+    if not conn_string:
+        return {"status": "error", "message": "Connection String not set in Lambda environment"}
 
     try:
         #conn = psycopg2.connect(db_url, connect_timeout=5)
-        # For psycopg2, try this format:
-        connection_string = "host=kyc-db.cobmk466kd4c.us-east-1.rds.amazonaws.com port=5432 dbname=kyc-db user=postgres password='P4ssw0rd1234!!'"
-        conn = psycopg2.connect(connection_string, connect_timeout=5)
+        # For psycopg2, try this format:        
+        conn = psycopg2.connect(conn_string, connect_timeout=5)
         cur = conn.cursor()
         cur.execute("SELECT version();")
         version = cur.fetchone()[0]
