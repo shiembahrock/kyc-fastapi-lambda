@@ -26,9 +26,12 @@
 # idna==3.6
 
 fastapi==0.110.3
+fastapi==0.110.3
 mangum>=0.17.0
+pydantic>=2.6,<3
 pydantic>=2.6,<3
 sqlalchemy==1.4.54
 python-dotenv==1.0.1
+psycopg2-binary==2.9.11
 psycopg2-binary==2.9.11
 email-validator>=2.0.0
