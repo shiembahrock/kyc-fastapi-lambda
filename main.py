@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, Depends
+from fastapi import FastAPI, APIRouter, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from typing import Optional
@@ -18,6 +18,10 @@ import json as _json
 import smtplib
 from email.message import EmailMessage
 import os
+try:
+    import stripe
+except ImportError:
+    stripe = None
 try:
     from mangum import Mangum
 except Exception:
@@ -445,6 +449,177 @@ def get_order_payment_by_code(order_code: str, db: Session = Depends(get_db)):
         "psp_ref_id": op.psp_ref_id,
         "psp_stripe_payment_intent": op.psp_stripe_payment_intent,
         "psp_stripe_receipt_url": op.psp_stripe_receipt_url,
+    }
+
+def _process_stripe_webhook_event(event: dict, db: Session) -> dict:
+    """
+    Process Stripe webhook events and update OrderPayment records.
+    
+    Supported events:
+    - payment_intent.succeeded: Payment completed successfully
+    - payment_intent.payment_failed: Payment failed
+    - checkout.session.completed: Checkout session completed
+    - charge.refunded: Payment refunded
+    """
+    event_type = event.get("type", "")
+    event_data = event.get("data", {}).get("object", {})
+    
+    result = {
+        "event_id": event.get("id"),
+        "event_type": event_type,
+        "processed": False,
+        "message": "",
+        "order_payment_id": None,
+    }
+    
+    try:
+        # Extract metadata with order payment ID
+        metadata = event_data.get("metadata", {})
+        order_payment_id = metadata.get("internal_order_payment_id")
+        
+        if not order_payment_id:
+            result["message"] = "No internal_order_payment_id found in metadata"
+            return result
+        
+        # Query the order payment record
+        op = db.query(OrderPayment).filter(
+            OrderPayment.order_payment_id == order_payment_id
+        ).first()
+        
+        if not op:
+            result["message"] = f"OrderPayment not found: {order_payment_id}"
+            return result
+        
+        result["order_payment_id"] = order_payment_id
+        
+        # Handle different event types
+        if event_type == "payment_intent.succeeded":
+            pi_id = event_data.get("id", "")
+            receipt_url = event_data.get("charges", {}).get("data", [{}])[0].get("receipt_url", "")
+            
+            op.payment_status = "succeeded"
+            op.checkout_session_status = "completed"
+            op.psp_stripe_payment_intent = pi_id
+            op.psp_stripe_receipt_url = receipt_url
+            op.transaction_date = datetime.fromtimestamp(
+                event_data.get("created", 0), tz=timezone.utc
+            )
+            
+            result["processed"] = True
+            result["message"] = f"Payment succeeded for order {op.order_code}"
+            
+        elif event_type == "payment_intent.payment_failed":
+            pi_id = event_data.get("id", "")
+            error_msg = event_data.get("last_payment_error", {}).get("message", "Unknown error")
+            
+            op.payment_status = "failed"
+            op.checkout_session_status = "payment_failed"
+            op.psp_stripe_payment_intent = pi_id
+            
+            result["processed"] = True
+            result["message"] = f"Payment failed for order {op.order_code}: {error_msg}"
+            
+        elif event_type == "checkout.session.completed":
+            session_id = event_data.get("id", "")
+            payment_status = event_data.get("payment_status", "")
+            
+            op.checkout_session_status = "completed"
+            op.psp_ref_id = session_id
+            
+            if payment_status == "paid":
+                op.payment_status = "paid"
+                result["processed"] = True
+                result["message"] = f"Checkout session completed for order {op.order_code}"
+            else:
+                op.payment_status = payment_status
+                result["processed"] = True
+                result["message"] = f"Checkout session completed with status: {payment_status}"
+            
+        elif event_type == "charge.refunded":
+            charge_id = event_data.get("id", "")
+            refund_amount = event_data.get("refunded", 0)
+            
+            op.payment_status = "refunded"
+            op.psp_ref_id = charge_id
+            
+            result["processed"] = True
+            result["message"] = f"Payment refunded for order {op.order_code}"
+            
+        else:
+            result["message"] = f"Event type '{event_type}' not handled"
+        
+        # Commit changes if processed
+        if result["processed"]:
+            db.commit()
+        
+    except Exception as e:
+        db.rollback()
+        result["message"] = f"Error processing event: {str(e)}"
+    
+    return result
+
+@app.post("/webhooks/stripe")
+async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Handle Stripe webhook events.
+    
+    To verify the webhook signature, set STRIPE_WEBHOOK_SECRET in environment variables.
+    Signature verification is optional but highly recommended for production.
+    """
+    if not stripe:
+        return {"error": "stripe library not installed", "status_code": 400}
+    
+    # Get Stripe configuration
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+    stripe_key = os.getenv("STRIPE_SECRET_KEY", "")
+    
+    if stripe_key:
+        stripe.api_key = stripe_key
+    
+    # Read the request body
+    body = await request.body()
+    
+    # Verify webhook signature if secret is configured
+    if webhook_secret:
+        sig_header = request.headers.get("stripe-signature", "")
+        try:
+            event = stripe.Webhook.construct_event(
+                body, sig_header, webhook_secret
+            )
+        except stripe.error.SignatureVerificationError as e:
+            return {
+                "error": "Invalid signature",
+                "details": str(e),
+                "status_code": 403,
+            }
+        except Exception as e:
+            return {
+                "error": "Error verifying webhook signature",
+                "details": str(e),
+                "status_code": 400,
+            }
+    else:
+        # If no webhook secret configured, parse the raw body
+        try:
+            event = _json.loads(body.decode("utf-8"))
+        except Exception as e:
+            return {
+                "error": "Invalid JSON",
+                "details": str(e),
+                "status_code": 400,
+            }
+    
+    # Process the webhook event
+    result = _process_stripe_webhook_event(event, db)
+    
+    return {
+        "received": True,
+        "status_code": 200,
+        "event_id": result.get("event_id"),
+        "event_type": result.get("event_type"),
+        "processed": result.get("processed"),
+        "message": result.get("message"),
+        "order_payment_id": result.get("order_payment_id"),
     }
 
 if Mangum:
