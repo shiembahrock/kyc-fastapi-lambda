@@ -18,6 +18,12 @@ import json as _json
 import smtplib
 from email.message import EmailMessage
 import os
+import boto3
+import logging
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
 try:
     import stripe
 except ImportError:
@@ -31,6 +37,9 @@ app = FastAPI(title="KYC Backend")
 
 # Adding router to test DB connection
 router = APIRouter()
+
+# client Lambda
+lambda_client = boto3.client('lambda', region_name=os.getenv('AWS_REGION', 'us-east-1'))
 
 @router.get("/check-db")
 def check_db():
@@ -332,64 +341,172 @@ def checkout_start(payload: CheckoutStartRequest, db: Session = Depends(get_db))
         "metadata[internal_order_payment_id]": str(op.order_payment_id),
         "payment_intent_data[metadata][internal_order_payment_id]": str(op.order_payment_id),
     }
-    url = "https://api.stripe.com/v1/checkout/sessions"
-    data = urllib.parse.urlencode(form).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method="POST")
-    req.add_header("Authorization", f"Bearer {secret}")
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    resp_status = 500
-    resp_body = {}
+
+    # Invoke an external (non-VPC) Lambda to perform the Stripe Checkout session creation
+    lambda_payload = {"action": "create_checkout_session", "payload": form}
     try:
-        with urllib.request.urlopen(req) as resp:
-            resp_status = resp.getcode()
-            resp_text = resp.read().decode("utf-8")
-            resp_body = _json.loads(resp_text)
-    except urllib.error.HTTPError as e:
-        resp_status = e.code
-        try:
-            resp_body = _json.loads(e.read().decode("utf-8"))
-        except Exception:
-            resp_body = {"error": str(e)}
+        response = lambda_client.invoke(
+            FunctionName="KYCFastAPIFunctionExternal",
+            InvocationType="RequestResponse",
+            Payload=_json.dumps(lambda_payload).encode("utf-8"),
+        )
     except Exception as e:
-        resp_status = 500
-        resp_body = {"error": str(e)}
-    if resp_status == 200:
-        created_ts = resp_body.get("created")
-        expires_ts = resp_body.get("expires_at")
-        checkout_url = resp_body.get("url")
-        ref_id = resp_body.get("id")
-        op.checkout_url = checkout_url or ""
-        op.psp_ref_id = ref_id or ""
-        op.transaction_date = datetime.fromtimestamp(created_ts or 0, tz=timezone.utc)
-        op.transaction_expired_date = datetime.fromtimestamp(expires_ts or 0, tz=timezone.utc)
-        db.commit()
-        cur = db.query(Currency).filter(Currency.currency_id == payload.currency_id).first()
-        cn = db.query(Country).filter(Country.country_id == payload.country_id).first()
-        total_text = (cur.currency_code if cur else "") + (cur.currency_symbol if cur else "") + f"{payload.price:,.2f}"
-        subject = f"Enigmatig KYC & AML - Order Confirmation - ({order_code})"
-        body = "Thank you for order our service\n" + \
-               "Total : " + total_text + "\n" + \
-               "Order Code : " + order_code + "\n" + \
-               "Full Name : " + payload.first_name + " " + payload.last_name + "\n" + \
-               "Company Name : " + payload.company_name + "\n" + \
-               "Country : " + (cn.country_name if cn else "")
-        email_res = _send_email(payload.email, subject, body)
-        return {
-            "status_code": 200,
-            "checkout_url": checkout_url,
-            "success_url": payload.success_url,
-            "cancel_url": payload.cancel_url,
-            "email_status": ("sent" if email_res.get("ok") else "failed"),
-            "email_reason": email_res.get("reason"),
-            "email_error": email_res.get("error"),
-        }
-    else:
+        logger.exception("checkout: lambda invoke error")
         db.rollback()
         return {
-            "status_code": resp_status,
-            "error_message": "Error on updating data. Please contact the customer support.",
+            "status_code": 500,
+            "error_message": "Error invoking external payment service",
+            "details": str(e),
         }
 
+    # If boto3 returned a non-200 invoke status, treat it as failure
+    try:
+        sc_invoke = response.get("StatusCode") if isinstance(response, dict) else None
+        if sc_invoke and int(sc_invoke) != 200:
+            logger.error("checkout: lambda invoke failed with StatusCode %s", sc_invoke)
+            db.rollback()
+            return {"status_code": sc_invoke, "error_message": "External payment service invoke failed", "details": response}
+    except Exception:
+        # non-fatal - continue to attempt parsing payload
+        pass
+
+    # Read and parse Lambda response payload (robust for Lambda HTTP shape)
+    resp_body = {}
+    try:
+        # Try reading the streaming Payload (typical boto3 invoke result)
+        payload_stream = None
+        if isinstance(response, dict):
+            payload_stream = response.get("Payload")
+
+        raw = None
+        if payload_stream and hasattr(payload_stream, "read"):
+            raw = payload_stream.read().decode("utf-8")
+        elif isinstance(response, (bytes, str)):
+            raw = response.decode("utf-8") if isinstance(response, bytes) else response
+        elif isinstance(response, dict) and not payload_stream:
+            # Fallback: stringify the whole dict
+            raw = _json.dumps(response)
+
+        parsed = None
+        if raw:
+            try:
+                parsed = _json.loads(raw)
+            except Exception:
+                parsed = None
+
+        # If parsed is the typical Lambda HTTP response {statusCode, body}
+        if isinstance(parsed, dict):
+            outer_status = parsed.get("statusCode") or parsed.get("StatusCode") or parsed.get("status")
+            body = parsed.get("body")
+            if body is not None:
+                if isinstance(body, str):
+                    try:
+                        resp_body = _json.loads(body)
+                    except Exception:
+                        resp_body = {"body": body}
+                elif isinstance(body, dict):
+                    resp_body = body
+                else:
+                    resp_body = {"body": body}
+            else:
+                # No body - use the parsed dict directly
+                resp_body = parsed
+
+            # If outer status indicates error, return early
+            try:
+                sc = int(outer_status) if outer_status is not None else None
+                if sc is not None and sc != 200:
+                    logger.error("checkout: external lambda returned non-200: %s", parsed)
+                    db.rollback()
+                    return {"status_code": sc, "error_message": "External payment service returned error", "details": parsed}
+            except Exception:
+                pass
+        else:
+            # Not a recognized lambda shape - try to interpret raw or fallback to response
+            if raw:
+                try:
+                    resp_body = _json.loads(raw)
+                except Exception:
+                    resp_body = {"body": raw}
+            else:
+                resp_body = response
+    except Exception as e:
+        logger.exception("checkout: error reading lambda payload")
+        db.rollback()
+        return {"status_code": 500, "error_message": "Error reading external service response", "details": str(e)}
+
+    # Extract session object from returned structure
+    session = None
+    if isinstance(resp_body, dict):
+        if "session" in resp_body:
+            session = resp_body.get("session")
+        elif "body" in resp_body:
+            body = resp_body.get("body")
+            # body may be a JSON string or dict
+            if isinstance(body, str):
+                try:
+                    body_json = _json.loads(body)
+                except Exception:
+                    body_json = None
+            else:
+                body_json = body
+            if isinstance(body_json, dict) and "session" in body_json:
+                session = body_json.get("session")
+    # If no session found, treat as error
+    if not session:
+        logger.error("checkout: no session returned from external lambda: %s", resp_body)
+        db.rollback()
+        return {"status_code": 500, "error_message": "Error creating checkout session", "details": resp_body}
+
+    # session might be a dict or a JSON string
+    if isinstance(session, str):
+        try:
+            session = _json.loads(session)
+        except Exception:
+            session = {"id": session}
+
+    # Update order payment with session info
+    created_ts = session.get("created")
+    expires_ts = session.get("expires_at")
+    checkout_url = session.get("url") or session.get("payment_url") or ""
+    ref_id = session.get("id")
+    op.checkout_url = checkout_url or ""
+    op.psp_ref_id = ref_id or ""
+    try:
+        if created_ts:
+            op.transaction_date = datetime.fromtimestamp(int(created_ts), tz=timezone.utc)
+    except Exception:
+        pass
+    try:
+        if expires_ts:
+            op.transaction_expired_date = datetime.fromtimestamp(int(expires_ts), tz=timezone.utc)
+    except Exception:
+        pass
+
+    db.commit()
+
+    cur = db.query(Currency).filter(Currency.currency_id == payload.currency_id).first()
+    cn = db.query(Country).filter(Country.country_id == payload.country_id).first()
+    total_text = (cur.currency_code if cur else "") + (cur.currency_symbol if cur else "") + f"{payload.price:,.2f}"
+    subject = f"Enigmatig KYC & AML - Order Confirmation - ({order_code})"
+    body = "Thank you for order our service\n" + \
+           "Total : " + total_text + "\n" + \
+           "Order Code : " + order_code + "\n" + \
+           "Full Name : " + payload.first_name + " " + payload.last_name + "\n" + \
+           "Company Name : " + payload.company_name + "\n" + \
+           "Country : " + (cn.country_name if cn else "")
+    email_res = _send_email(payload.email, subject, body)
+
+    return {
+        "status_code": 200,
+        "checkout_url": checkout_url,
+        "psp_ref_id": ref_id,
+        "success_url": payload.success_url,
+        "cancel_url": payload.cancel_url,
+        "email_status": ("sent" if email_res.get("ok") else "failed"),
+        "email_reason": email_res.get("reason"),
+        "email_error": email_res.get("error"),
+    }
 @app.get("/email/test")
 def email_test(to: EmailStr, subject: Optional[str] = None, body: Optional[str] = None):
     s = subject or "Test Email"
