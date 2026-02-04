@@ -74,6 +74,7 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://localhost:5174",
         "http://127.0.0.1:5174",
+        "https://staging.d27qd8fx6l7txq.amplifyapp.com"
     ],
     allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
     allow_credentials=True,
@@ -359,7 +360,19 @@ def checkout_start(payload: CheckoutStartRequest, db: Session = Depends(get_db))
             "details": str(e),
         }
 
-    # If boto3 returned a non-200 invoke status, treat it as failure
+    # 1. Read streaming payload once (do not re-read, it will exhaust the stream).
+    try:
+        payload_bytes = response["Payload"].read()
+        payload_str = payload_bytes.decode("utf-8") if payload_bytes else ""
+        payload_json = _json.loads(payload_str) if payload_str else {}
+    except Exception as e:
+        logger.exception("checkout: error reading lambda payload")
+        db.rollback()
+        return {"status_code": 500, "error_message": "Error reading external service response", "details": str(e)}
+
+    logger.info("Lambda B response: %s", payload_json)
+
+    # Invoke status check
     try:
         sc_invoke = response.get("StatusCode") if isinstance(response, dict) else None
         if sc_invoke and int(sc_invoke) != 200:
@@ -370,70 +383,42 @@ def checkout_start(payload: CheckoutStartRequest, db: Session = Depends(get_db))
         # non-fatal - continue to attempt parsing payload
         pass
 
-    # Read and parse Lambda response payload (robust for Lambda HTTP shape)
+    # Parse Lambda response payload (robust for Lambda HTTP shape)
     resp_body = {}
-    try:
-        # Try reading the streaming Payload (typical boto3 invoke result)
-        payload_stream = None
-        if isinstance(response, dict):
-            payload_stream = response.get("Payload")
-
-        raw = None
-        if payload_stream and hasattr(payload_stream, "read"):
-            raw = payload_stream.read().decode("utf-8")
-        elif isinstance(response, (bytes, str)):
-            raw = response.decode("utf-8") if isinstance(response, bytes) else response
-        elif isinstance(response, dict) and not payload_stream:
-            # Fallback: stringify the whole dict
-            raw = _json.dumps(response)
-
-        parsed = None
-        if raw:
-            try:
-                parsed = _json.loads(raw)
-            except Exception:
-                parsed = None
-
-        # If parsed is the typical Lambda HTTP response {statusCode, body}
-        if isinstance(parsed, dict):
-            outer_status = parsed.get("statusCode") or parsed.get("StatusCode") or parsed.get("status")
-            body = parsed.get("body")
-            if body is not None:
-                if isinstance(body, str):
-                    try:
-                        resp_body = _json.loads(body)
-                    except Exception:
-                        resp_body = {"body": body}
-                elif isinstance(body, dict):
-                    resp_body = body
-                else:
-                    resp_body = {"body": body}
-            else:
-                # No body - use the parsed dict directly
-                resp_body = parsed
-
-            # If outer status indicates error, return early
-            try:
-                sc = int(outer_status) if outer_status is not None else None
-                if sc is not None and sc != 200:
-                    logger.error("checkout: external lambda returned non-200: %s", parsed)
-                    db.rollback()
-                    return {"status_code": sc, "error_message": "External payment service returned error", "details": parsed}
-            except Exception:
-                pass
-        else:
-            # Not a recognized lambda shape - try to interpret raw or fallback to response
-            if raw:
+    parsed = payload_json if isinstance(payload_json, dict) else None
+    if isinstance(parsed, dict):
+        outer_status = parsed.get("statusCode") or parsed.get("StatusCode") or parsed.get("status")
+        body = parsed.get("body")
+        if body is not None:
+            if isinstance(body, str):
                 try:
-                    resp_body = _json.loads(raw)
+                    resp_body = _json.loads(body)
                 except Exception:
-                    resp_body = {"body": raw}
+                    resp_body = {"body": body}
+            elif isinstance(body, dict):
+                resp_body = body
             else:
-                resp_body = response
-    except Exception as e:
-        logger.exception("checkout: error reading lambda payload")
-        db.rollback()
-        return {"status_code": 500, "error_message": "Error reading external service response", "details": str(e)}
+                resp_body = {"body": body}
+        else:
+            # No body - use the parsed dict directly
+            resp_body = parsed
+
+        logger.info("Lambda parsed payload: %s", resp_body)
+
+        # If outer status indicates error, return early
+        try:
+            sc = int(outer_status) if outer_status is not None else None
+            if sc is not None and sc != 200:
+                logger.error("checkout: external lambda returned non-200: %s", parsed)
+                db.rollback()
+                return {"status_code": sc, "error_message": "External payment service returned error", "details": parsed}
+        except Exception:
+            pass
+    else:
+        # Not a recognized lambda shape - fallback to raw string
+        resp_body = {"body": payload_str}
+
+        logger.info("Lambda fallback response parsed: %s", resp_body)
 
     # Extract session object from returned structure
     session = None
@@ -495,7 +480,7 @@ def checkout_start(payload: CheckoutStartRequest, db: Session = Depends(get_db))
            "Full Name : " + payload.first_name + " " + payload.last_name + "\n" + \
            "Company Name : " + payload.company_name + "\n" + \
            "Country : " + (cn.country_name if cn else "")
-    email_res = _send_email(payload.email, subject, body)
+    #email_res = _send_email(payload.email, subject, body)
 
     return {
         "status_code": 200,
@@ -503,9 +488,9 @@ def checkout_start(payload: CheckoutStartRequest, db: Session = Depends(get_db))
         "psp_ref_id": ref_id,
         "success_url": payload.success_url,
         "cancel_url": payload.cancel_url,
-        "email_status": ("sent" if email_res.get("ok") else "failed"),
-        "email_reason": email_res.get("reason"),
-        "email_error": email_res.get("error"),
+        #"email_status": ("sent" if email_res.get("ok") else "failed"),
+        #"email_reason": email_res.get("reason"),
+        #"email_error": email_res.get("error"),
     }
 @app.get("/email/test")
 def email_test(to: EmailStr, subject: Optional[str] = None, body: Optional[str] = None):
