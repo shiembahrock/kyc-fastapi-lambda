@@ -20,6 +20,7 @@ from email.message import EmailMessage
 import os
 import boto3
 import logging
+from enums import UsageStatus
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -235,61 +236,7 @@ def list_service_prices(db: Session = Depends(get_db)):
 def _gen_order_code():
     h = _uuid.uuid4().hex
     return h[0:6] + h[24:30]
-def _send_email(to_email: str, subject: str, body: str):
-    try:
-        host = os.getenv("SMTP_HOST", "smtp.office365.com")
-        port = int(os.getenv("SMTP_PORT", "587"))
-        user = os.getenv("SMTP_USER", "")
-        password = os.getenv("SMTP_PASS", "")
-        msg = EmailMessage()
-        msg["From"] = user or "no-reply@example.com"
-        msg["To"] = to_email
-        msg["Subject"] = subject
-        msg.set_content(body)
-        if host and port and user and password:
-            with smtplib.SMTP(host, port) as s:
-                s.starttls()
-                s.login(user, password)
-                s.send_message(msg)
-            return {"ok": True}
-        else:
-            return {"ok": False, "reason": "missing_config", "details": {"host": host, "port": port, "user": bool(user), "password": bool(password)}}
-    except smtplib.SMTPAuthenticationError as e:
-        return {"ok": False, "reason": "auth", "error": str(e)}
-    except Exception as e:
-        return {"ok": False, "reason": "smtp", "error": str(e)}
-def _send_email_verbose(to_email: str, subject: str, body: str):
-    host = os.getenv("SMTP_HOST", "smtp.office365.com")
-    port = int(os.getenv("SMTP_PORT", "587"))
-    user = os.getenv("SMTP_USER", "")
-    password = os.getenv("SMTP_PASS", "")
-    msg = EmailMessage()
-    msg["From"] = user or "no-reply@example.com"
-    msg["To"] = to_email
-    msg["Subject"] = subject
-    msg.set_content(body)
-    if not (host and port and user and password):
-        return {"ok": False, "reason": "missing_config", "details": {"host": host, "port": port, "user": bool(user), "password": bool(password)}}
-    try:
-        with smtplib.SMTP(host, port) as s:
-            c1, m1 = s.ehlo()
-            c2, m2 = s.starttls()
-            c3, m3 = s.login(user, password)
-            refused = s.sendmail(msg["From"], [to_email], msg.as_string())
-            return {
-                "ok": not bool(refused),
-                "ehlo_code": c1,
-                "ehlo_msg": (m1.decode("utf-8", errors="ignore") if isinstance(m1, bytes) else str(m1)),
-                "starttls_code": c2,
-                "starttls_msg": (m2.decode("utf-8", errors="ignore") if isinstance(m2, bytes) else str(m2)),
-                "login_code": c3,
-                "login_msg": (m3.decode("utf-8", errors="ignore") if isinstance(m3, bytes) else str(m3)),
-                "sendmail_refused": refused,
-            }
-    except smtplib.SMTPAuthenticationError as e:
-        return {"ok": False, "reason": "auth", "error": str(e)}
-    except Exception as e:
-        return {"ok": False, "reason": "smtp", "error": str(e)}
+
 @app.post("/checkout/start")
 def checkout_start(payload: CheckoutStartRequest, db: Session = Depends(get_db)):
     g = db.query(GuestAccount).filter(GuestAccount.email == payload.email).first()
@@ -360,28 +307,12 @@ def checkout_start(payload: CheckoutStartRequest, db: Session = Depends(get_db))
             "details": str(e),
         }
 
-    # 1. Read streaming payload once (do not re-read, it will exhaust the stream).
-    try:
-        payload_bytes = response["Payload"].read()
-        payload_str = payload_bytes.decode("utf-8") if payload_bytes else ""
-        payload_json = _json.loads(payload_str) if payload_str else {}
-    except Exception as e:
-        logger.exception("checkout: error reading lambda payload")
-        db.rollback()
-        return {"status_code": 500, "error_message": "Error reading external service response", "details": str(e)}
+    # 1. Read streaming payload
+    payload_bytes = response["Payload"].read()
+    payload_str = payload_bytes.decode("utf-8")
+    payload_json = json.loads(payload_str)
 
     logger.info("Lambda B response: %s", payload_json)
-
-    # Invoke status check
-    try:
-        sc_invoke = response.get("StatusCode") if isinstance(response, dict) else None
-        if sc_invoke and int(sc_invoke) != 200:
-            logger.error("checkout: lambda invoke failed with StatusCode %s", sc_invoke)
-            db.rollback()
-            return {"status_code": sc_invoke, "error_message": "External payment service invoke failed", "details": response}
-    except Exception:
-        # non-fatal - continue to attempt parsing payload
-        pass
 
     # Parse Lambda response payload (robust for Lambda HTTP shape)
     resp_body = {}
@@ -480,7 +411,22 @@ def checkout_start(payload: CheckoutStartRequest, db: Session = Depends(get_db))
            "Full Name : " + payload.first_name + " " + payload.last_name + "\n" + \
            "Company Name : " + payload.company_name + "\n" + \
            "Country : " + (cn.country_name if cn else "")
-    #email_res = _send_email(payload.email, subject, body)
+
+    # Invoke an external (non-VPC) Lambda to perform the Send Email action
+    send_email_payload = {"action": "send_email", "payload": {"to_email": payload.email, "subject": subject, "body": body, "is_html": False}}
+    try:
+        response = lambda_client.invoke(
+            FunctionName="KYCFastAPIFunctionExternal",
+            InvocationType="RequestResponse",
+            Payload=_json.dumps(send_email_payload).encode("utf-8"),
+        )
+    except Exception as e:
+        logger.exception("send_email: lambda invoke error")
+        return {
+            "status_code": 500,
+            "error_message": "Error invoking external payment service",
+            "details": str(e),
+        }
 
     return {
         "status_code": 200,
@@ -492,12 +438,7 @@ def checkout_start(payload: CheckoutStartRequest, db: Session = Depends(get_db))
         #"email_reason": email_res.get("reason"),
         #"email_error": email_res.get("error"),
     }
-@app.get("/email/test")
-def email_test(to: EmailStr, subject: Optional[str] = None, body: Optional[str] = None):
-    s = subject or "Test Email"
-    b = body or "Test email from KYC Backend"
-    res = _send_email_verbose(str(to), s, b)
-    return res
+
 @app.get("/service-prices/{service_price_id}")
 def get_service_price(service_price_id: str, db: Session = Depends(get_db)):
     q = (
@@ -563,8 +504,16 @@ def _process_stripe_webhook_event(event: dict, db: Session) -> dict:
     - checkout.session.completed: Checkout session completed
     - charge.refunded: Payment refunded
     """
+    
     event_type = event.get("type", "")
-    event_data = event.get("data", {}).get("object", {})
+    event_data = event.get("data", {})
+    
+    # Handle case where event_data might be a string
+    if isinstance(event_data, str):
+        try:
+            event_data = _json.loads(event_data)
+        except Exception:
+            event_data = {}
     
     result = {
         "event_id": event.get("id"),
@@ -573,12 +522,11 @@ def _process_stripe_webhook_event(event: dict, db: Session) -> dict:
         "message": "",
         "order_payment_id": None,
     }
-    
     try:
         # Extract metadata with order payment ID
-        metadata = event_data.get("metadata", {})
+        metadata = event_data.get("metadata", {}) if isinstance(event_data, dict) else {}
         order_payment_id = metadata.get("internal_order_payment_id")
-        
+                
         if not order_payment_id:
             result["message"] = "No internal_order_payment_id found in metadata"
             return result
@@ -621,12 +569,15 @@ def _process_stripe_webhook_event(event: dict, db: Session) -> dict:
             result["processed"] = True
             result["message"] = f"Payment failed for order {op.order_code}: {error_msg}"
             
-        elif event_type == "checkout.session.completed":
+        elif event_type == "checkout.session.completed":            
             session_id = event_data.get("id", "")
             payment_status = event_data.get("payment_status", "")
+            payment_intent = event_data.get("payment_intent", "")
             
             op.checkout_session_status = "completed"
             op.psp_ref_id = session_id
+            op.psp_stripe_payment_intent = payment_intent
+            op.usage_status = UsageStatus.Usable
             
             if payment_status == "paid":
                 op.payment_status = "paid"
@@ -635,8 +586,8 @@ def _process_stripe_webhook_event(event: dict, db: Session) -> dict:
             else:
                 op.payment_status = payment_status
                 result["processed"] = True
-                result["message"] = f"Checkout session completed with status: {payment_status}"
-            
+                result["message"] = f"Checkout session completed with status: {payment_status}"            
+
         elif event_type == "charge.refunded":
             charge_id = event_data.get("id", "")
             refund_amount = event_data.get("refunded", 0)
@@ -646,7 +597,15 @@ def _process_stripe_webhook_event(event: dict, db: Session) -> dict:
             
             result["processed"] = True
             result["message"] = f"Payment refunded for order {op.order_code}"
-            
+        
+        elif event_type == "charge.updated":
+            isPaid = event_data.get("paid", False)
+            if isPaid:
+                op.psp_stripe_receipt_url = event_data.get("receipt_url", "")
+                op.usage_status = UsageStatus.Usable            
+
+            result["processed"] = True
+            result["message"] = f"Payment updated for order {op.order_code}"
         else:
             result["message"] = f"Event type '{event_type}' not handled"
         
@@ -659,70 +618,6 @@ def _process_stripe_webhook_event(event: dict, db: Session) -> dict:
         result["message"] = f"Error processing event: {str(e)}"
     
     return result
-
-@app.post("/webhooks/stripe")
-async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
-    """
-    Handle Stripe webhook events.
-    
-    To verify the webhook signature, set STRIPE_WEBHOOK_SECRET in environment variables.
-    Signature verification is optional but highly recommended for production.
-    """
-    if not stripe:
-        return {"error": "stripe library not installed", "status_code": 400}
-    
-    # Get Stripe configuration
-    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-    stripe_key = os.getenv("STRIPE_SECRET_KEY", "")
-    
-    if stripe_key:
-        stripe.api_key = stripe_key
-    
-    # Read the request body
-    body = await request.body()
-    
-    # Verify webhook signature if secret is configured
-    if webhook_secret:
-        sig_header = request.headers.get("stripe-signature", "")
-        try:
-            event = stripe.Webhook.construct_event(
-                body, sig_header, webhook_secret
-            )
-        except stripe.error.SignatureVerificationError as e:
-            return {
-                "error": "Invalid signature",
-                "details": str(e),
-                "status_code": 403,
-            }
-        except Exception as e:
-            return {
-                "error": "Error verifying webhook signature",
-                "details": str(e),
-                "status_code": 400,
-            }
-    else:
-        # If no webhook secret configured, parse the raw body
-        try:
-            event = _json.loads(body.decode("utf-8"))
-        except Exception as e:
-            return {
-                "error": "Invalid JSON",
-                "details": str(e),
-                "status_code": 400,
-            }
-    
-    # Process the webhook event
-    result = _process_stripe_webhook_event(event, db)
-    
-    return {
-        "received": True,
-        "status_code": 200,
-        "event_id": result.get("event_id"),
-        "event_type": result.get("event_type"),
-        "processed": result.get("processed"),
-        "message": result.get("message"),
-        "order_payment_id": result.get("order_payment_id"),
-    }
 
 if Mangum:
     handler = Mangum(app, lifespan="off")
