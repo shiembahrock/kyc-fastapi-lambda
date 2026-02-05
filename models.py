@@ -102,3 +102,21 @@ class StripeSetting(Base):
     stripe_setting_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     publishable_key = Column(String(255))
     secret_key = Column(String(255), nullable=False)
+
+class MuinmosSetting(Base):
+    __tablename__ = "muinmos_settings"
+    muinmoss_setting_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id = Column(String, nullable=False)
+    client_secret = Column(String, nullable=False)
+    username = Column(String, nullable=False)
+    password = Column(String, nullable=False)
+    grant_type = Column(String, nullable=False)
+    is_used = Column(Boolean, nullable=False, default=True)
+
+class MuinmosToken(Base):
+    __tablename__ = "muinmos_tokens"
+    muinmos_token_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expired_at = Column(DateTime(timezone=True), nullable=False)
+    token_type = Column(String(10))
+    access_token = Column(String(1200), nullable=False)
