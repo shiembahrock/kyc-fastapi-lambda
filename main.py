@@ -146,10 +146,18 @@ def on_startup():
     try:
         if env in ("local", "dev") and engine.dialect.name == "postgresql":
             with engine.connect() as conn:
+                # Check and fix orders table
                 q = text("SELECT data_type FROM information_schema.columns WHERE table_name='orders' AND column_name='order_id'")
                 res = conn.execute(q).scalar()
                 if res and res.lower() != "uuid":
                     conn.execute(text("ALTER TABLE orders ALTER COLUMN order_id TYPE uuid USING order_id::uuid"))
+                    conn.commit()
+                
+                # Add base_api_url column to muinmos_settings if it doesn't exist
+                q = text("SELECT column_name FROM information_schema.columns WHERE table_name='muinmos_settings' AND column_name='base_api_url'")
+                res = conn.execute(q).scalar()
+                if not res:
+                    conn.execute(text("ALTER TABLE muinmos_settings ADD COLUMN base_api_url VARCHAR NOT NULL DEFAULT ''"))
                     conn.commit()
     except Exception:
         pass

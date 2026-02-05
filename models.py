@@ -111,6 +111,7 @@ class MuinmosSetting(Base):
     username = Column(String, nullable=False)
     password = Column(String, nullable=False)
     grant_type = Column(String, nullable=False)
+    base_api_url = Column(String, nullable=False)
     is_used = Column(Boolean, nullable=False, default=True)
 
 class MuinmosToken(Base):
