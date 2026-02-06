@@ -8,10 +8,10 @@ import json
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from db import Base, engine, SessionLocal
-from models import Order, ServicePrice, Currency, Country, OrderPayment, GuestAccount, StripeSetting
+from models import Order, ServicePrice, Currency, Country, OrderPayment, GuestAccount, StripeSetting, MuinmosSetting, MuinmosToken
 from decimal import Decimal
 import uuid as _uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import urllib.parse
 import urllib.request
 import json as _json
@@ -626,6 +626,100 @@ def _process_stripe_webhook_event(event: dict, db: Session) -> dict:
         result["message"] = f"Error processing event: {str(e)}"
     
     return result
+
+@app.get("/muinmos/token")
+def get_muinmos_token_endpoint(db: Session = Depends(get_db)):
+    return get_muinmos_token(db)
+
+def get_muinmos_token(db: Session = Depends(get_db)):
+    """Get Muinmos token, fetch new one if expired or doesn't exist"""
+    token = db.query(MuinmosToken).first()
+    now = datetime.now(timezone.utc)
+    
+    # Check if token exists and is still valid
+    if token and token.expired_at > now:
+        return {
+            "access_token": token.access_token,
+            "token_type": token.token_type,
+            "expired_at": token.expired_at.isoformat()
+        }
+    
+    # Get Muinmos settings
+    settings = db.query(MuinmosSetting).filter(MuinmosSetting.is_used == True).first()
+    if not settings:
+        return {"error": "No active Muinmos settings found"}
+    
+    # Invoke external Lambda to get token
+    payload = {
+        "action": "get_muinmos_token",
+        "payload": {
+            "grant_type": settings.grant_type,
+            "client_id": settings.organization_id,
+            "client_secret": settings.client_secret,
+            "username": settings.username,
+            "password": settings.password,
+            "api_url": settings.base_api_url + "/token?api-version=2.0"
+        }
+    }
+    
+    try:
+        response = lambda_client.invoke(
+            FunctionName="KYCFastAPIFunctionExternal",
+            InvocationType="RequestResponse",
+            Payload=_json.dumps(payload).encode("utf-8")
+        )
+        response_payload = _json.loads(response["Payload"].read().decode("utf-8"))
+        
+        logger.info(f"Muinmos token response: {response_payload}")
+        
+        if "error" in response_payload:
+            return {"error": response_payload["error"]}
+        
+        # Extract token data from response
+        token_data = response_payload.get("token_data", response_payload)
+        logger.info(f"Extracted token_data: {token_data}")
+        
+        # Validate required fields
+        access_token = token_data.get("access_token")
+        token_type = token_data.get("token_type")
+        logger.info(f"access_token exists: {bool(access_token)}, token_type: {token_type}")
+        
+        if not access_token:
+            logger.error(f"No access_token in response: {response_payload}")
+            return {"error": "No access_token in response from external Lambda"}
+        
+        # Calculate expiration time (expires_in - 300 seconds buffer)
+        expires_in = token_data.get("expires_in", 3600)
+        expired_at = now + timedelta(seconds=expires_in - 300)
+        
+        logger.info(f"About to save token - access_token length: {len(access_token)}, token_type: {token_type}, expires_in: {expires_in}")
+        
+        if token:
+            # Update existing token
+            token.access_token = access_token
+            token.token_type = token_type
+            token.expired_at = expired_at
+            token.created_at = now
+        else:
+            # Insert new token
+            token = MuinmosToken(
+                access_token=access_token,
+                token_type=token_type,
+                expired_at=expired_at
+            )
+            db.add(token)
+        
+        db.commit()
+        
+        return {
+            "access_token": token.access_token,
+            "token_type": token.token_type,
+            "expired_at": token.expired_at.isoformat()
+        }
+    
+    except Exception as e:
+        logger.exception("Error getting Muinmos token")
+        return {"error": str(e)}
 
 if Mangum:
     handler = Mangum(app, lifespan="off")
