@@ -121,3 +121,13 @@ class MuinmosToken(Base):
     expired_at = Column(DateTime(timezone=True), nullable=False)
     token_type = Column(String(10))
     access_token = Column(String(1200), nullable=False)
+
+class OrderAssessment(Base):
+    __tablename__ = "order_assessments"
+    order_assessment_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    order_payment_id = Column(UUID(as_uuid=True), ForeignKey("order_payments.order_payment_id"), nullable=False)
+    created_date = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    assessment_id = Column(UUID(as_uuid=True), nullable=False)
+    reference_key = Column(String(100))
+    is_complete = Column(Boolean, nullable=False, default=False)
+    pdf_sent = Column(Boolean, nullable=False, default=False)

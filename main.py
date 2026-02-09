@@ -8,7 +8,7 @@ import json
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from db import Base, engine, SessionLocal
-from models import Order, ServicePrice, Currency, Country, OrderPayment, GuestAccount, StripeSetting, MuinmosSetting, MuinmosToken
+from models import Order, ServicePrice, Currency, Country, OrderPayment, GuestAccount, StripeSetting, MuinmosSetting, MuinmosToken, OrderAssessment
 from decimal import Decimal
 import uuid as _uuid
 from datetime import datetime, timezone, timedelta
@@ -582,7 +582,7 @@ def _process_stripe_webhook_event(event: dict, db: Session) -> dict:
             payment_status = event_data.get("payment_status", "")
             payment_intent = event_data.get("payment_intent", "")
             
-            op.checkout_session_status = "completed"
+            op.checkout_session_status = "complete"
             op.psp_ref_id = session_id
             op.psp_stripe_payment_intent = payment_intent
             op.usage_status = UsageStatus.Usable
@@ -620,6 +620,13 @@ def _process_stripe_webhook_event(event: dict, db: Session) -> dict:
         # Commit changes if processed
         if result["processed"]:
             db.commit()
+            
+            # Call create_assessment after commit for checkout.session.completed with paid status
+            if event_type == "checkout.session.completed" and event_data.get("payment_status") == "paid":
+                guest = db.query(GuestAccount).filter(GuestAccount.guest_account_id == op.guest_account_id).first()
+                if guest:
+                    assessment_result = create_assessment(guest.email, op.order_code, db)
+                    result["assessment"] = assessment_result
         
     except Exception as e:
         db.rollback()
@@ -630,6 +637,10 @@ def _process_stripe_webhook_event(event: dict, db: Session) -> dict:
 @app.get("/muinmos/token")
 def get_muinmos_token_endpoint(db: Session = Depends(get_db)):
     return get_muinmos_token(db)
+
+@app.post("/muinmos/create-assessment")
+def create_assessment_endpoint(user_email: str, order_code: str, db: Session = Depends(get_db)):
+    return create_assessment(user_email, order_code, db)
 
 def get_muinmos_token(db: Session = Depends(get_db)):
     """Get Muinmos token, fetch new one if expired or doesn't exist"""
@@ -719,6 +730,106 @@ def get_muinmos_token(db: Session = Depends(get_db)):
     
     except Exception as e:
         logger.exception("Error getting Muinmos token")
+        return {"error": str(e)}
+
+def create_assessment(user_email: str, order_code: str, db: Session):
+    """Create assessment for order"""
+    # Step 1: Validate order payment
+    op = db.query(OrderPayment).filter(
+        OrderPayment.order_code == order_code,
+        OrderPayment.usage_status == UsageStatus.Usable,
+        OrderPayment.checkout_session_status == "complete",
+        OrderPayment.payment_status == "paid"
+    ).first()
+    
+    if not op:
+        return {"error": "Not Allowed"}
+    
+    # Step 2: Check service limits
+    sp = db.query(ServicePrice).filter(ServicePrice.service_price_id == op.service_id_ordered).first()
+    if not sp:
+        return {"error": "Service not found"}
+    
+    count_oa = db.query(OrderAssessment).filter(OrderAssessment.order_payment_id == op.order_payment_id).count()
+    
+    if not sp.is_search_by_credit:
+        if sp.search_number and sp.search_number > count_oa:
+            reference_key = f"{order_code}-{count_oa + 1}"
+        else:
+            return {"error": "Not Allowed"}
+    else:
+        if sp.search_number is not None:
+            if sp.search_number > count_oa:
+                reference_key = f"{order_code}-{count_oa + 1}"
+            else:
+                return {"error": "Not Allowed"}
+        else:
+            return {"error": "Not Allowed"}
+    
+    # Step 3: Get Muinmos settings
+    settings = db.query(MuinmosSetting).filter(MuinmosSetting.is_used == True).first()
+    if not settings:
+        return {"error": "No active Muinmos settings found"}
+    
+    # Step 4: Get Muinmos token
+    token_response = get_muinmos_token(db)
+    if "error" in token_response:
+        return token_response
+    
+    # Step 5: Invoke external Lambda to create assessment
+    payload = {
+        "action": "create_assessment",
+        "payload": {
+            "user_email": user_email,
+            "order_code": reference_key,
+            "api_url": settings.base_api_url + "/api/assessment?api-version=2.0",
+            "token_type": token_response["token_type"],
+            "access_token": token_response["access_token"]
+        }
+    }
+    
+    try:
+        response = lambda_client.invoke(
+            FunctionName="KYCFastAPIFunctionExternal",
+            InvocationType="RequestResponse",
+            Payload=_json.dumps(payload).encode("utf-8")
+        )
+        response_payload = _json.loads(response["Payload"].read().decode("utf-8"))
+        
+        if not response_payload.get("success"):
+            return {"error": "Failed to create assessment", "details": response_payload}
+        
+        assessment_id = response_payload.get("assessment_id")
+        if not assessment_id:
+            return {"error": "No assessment_id in response"}
+        
+        # Parse assessment_id if it's a JSON string
+        if isinstance(assessment_id, str):
+            try:
+                assessment_id = _json.loads(assessment_id)
+            except Exception:
+                assessment_id = assessment_id.strip('"')
+        
+        # Step 6: Insert new order assessment
+        oa = OrderAssessment(
+            order_payment_id=op.order_payment_id,
+            assessment_id=assessment_id,
+            reference_key=reference_key,
+            pdf_sent=False
+        )
+        db.add(oa)
+        db.commit()
+        db.refresh(oa)
+        
+        # Step 7: Return success
+        return {
+            "status": "success create an assessment",
+            "assessment_id": assessment_id
+        }
+    
+    except Exception as e:
+        logger.exception("Error creating assessment")
+        db.rollback()
         return {"error": str(e)}
 
 if Mangum:
