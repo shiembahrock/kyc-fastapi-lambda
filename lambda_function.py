@@ -1,5 +1,5 @@
 from mangum import Mangum
-from main import app, _process_stripe_webhook_event, muinmos_assessment_check, SessionLocal
+from main import app, _process_stripe_webhook_event, muinmos_assessment_check, check_muinmos_assessment_to_send_kycpdf, SessionLocal
 
 def lambda_handler(event, context):
     """Direct Lambda handler for non-HTTP invocations"""
@@ -18,6 +18,8 @@ def lambda_handler(event, context):
         try:
             if action == "muinmos_assessment_check":
                 result = muinmos_assessment_check(db)
+            elif action == "check_muinmos_assessment_to_send_kycpdf":
+                result = check_muinmos_assessment_to_send_kycpdf(db)
             else:
                 result = {"error": f"Unknown EventBridge action: {action}"}
             return result
