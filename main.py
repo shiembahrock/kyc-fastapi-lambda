@@ -642,6 +642,10 @@ def get_muinmos_token_endpoint(db: Session = Depends(get_db)):
 def create_assessment_endpoint(user_email: str, order_code: str, db: Session = Depends(get_db)):
     return create_assessment(user_email, order_code, db)
 
+@app.post("/muinmos/assessment-check")
+def muinmos_assessment_check_endpoint(db: Session = Depends(get_db)):
+    return muinmos_assessment_check(db)
+
 def get_muinmos_token(db: Session = Depends(get_db)):
     """Get Muinmos token, fetch new one if expired or doesn't exist"""
     token = db.query(MuinmosToken).first()
@@ -830,6 +834,106 @@ def create_assessment(user_email: str, order_code: str, db: Session):
     except Exception as e:
         logger.exception("Error creating assessment")
         db.rollback()
+        return {"error": str(e)}
+
+def muinmos_assessment_check(db: Session):
+    """Check and update assessment completion status"""
+    # Step 1: Get incomplete assessments
+    assessments = db.query(OrderAssessment).filter(
+        OrderAssessment.is_complete == False
+    ).order_by(OrderAssessment.created_date.asc()).all()
+    
+    if not assessments:
+        return {"status": "no_pending_assessments"}
+    
+    from_date = assessments[0].created_date.isoformat()
+    to_date = assessments[-1].created_date.isoformat()
+    
+    # Step 2: Get Muinmos settings
+    settings = db.query(MuinmosSetting).filter(MuinmosSetting.is_used == True).first()
+    if not settings:
+        return {"error": "No active Muinmos settings found"}
+    
+    base_api_url = settings.base_api_url
+    
+    # Step 3: Get Muinmos token
+    token_response = get_muinmos_token(db)
+    if "error" in token_response:
+        logger.error(f"Failed to get Muinmos token: {token_response}")
+        return token_response
+    
+    # Step 4: Invoke external Lambda
+    payload = {
+        "action": "muinmos_assessment_search",
+        "payload": {
+            "from_date": from_date,
+            "to_date": to_date,
+            "base_api_url": base_api_url,
+            "token_type": token_response["token_type"],
+            "access_token": token_response["access_token"]
+        }
+    }
+    
+    try:
+        response = lambda_client.invoke(
+            FunctionName="KYCFastAPIFunctionExternal",
+            InvocationType="RequestResponse",
+            Payload=_json.dumps(payload).encode("utf-8")
+        )
+        response_payload = _json.loads(response["Payload"].read().decode("utf-8"))
+        
+        if not response_payload.get("success"):
+            return {"error": "Failed to search assessments", "details": response_payload}
+        
+        data = response_payload.get("data", {})
+        remote_assessments = data.get("assessments", [])
+        
+        # Step 5: Loop and update
+        updated_count = 0
+        for oa in assessments:
+            matched = next((a for a in remote_assessments if a.get("id") == str(oa.assessment_id)), None)
+            
+            if not matched:
+                continue
+            
+            if matched.get("state") != "Completed":
+                continue
+            
+            oa.is_complete = True
+            db.commit()
+            updated_count += 1
+            
+            # Get order payment and service price
+            op = db.query(OrderPayment).filter(
+                OrderPayment.order_payment_id == oa.order_payment_id
+            ).first()
+            
+            if not op:
+                continue
+            
+            sp = db.query(ServicePrice).filter(
+                ServicePrice.service_price_id == op.service_id_ordered
+            ).first()
+            
+            if not sp or sp.is_search_by_credit:
+                continue
+            
+            count = db.query(OrderAssessment).filter(
+                OrderAssessment.order_payment_id == oa.order_payment_id
+            ).count()
+            
+            if count >= sp.search_number:
+                op.usage_status = UsageStatus.Completed
+                db.commit()
+        
+        return {
+            "status": "success",
+            "checked": len(assessments),
+            "updated": updated_count
+        }
+    
+    except Exception as e:
+        logger.exception("Error checking assessments")
         return {"error": str(e)}
 
 if Mangum:
