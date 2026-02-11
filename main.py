@@ -421,7 +421,7 @@ def checkout_start(payload: CheckoutStartRequest, db: Session = Depends(get_db))
            "Country : " + (cn.country_name if cn else "")
 
     # Invoke an external (non-VPC) Lambda to perform the Send Email action
-    send_email_payload = {"action": "send_email", "payload": {"to_email": payload.email, "subject": subject, "body": body, "is_html": False}}
+    send_email_payload = {"action": "send_email_smtp", "payload": {"to_email": payload.email, "subject": subject, "body": body, "is_html": False}}
     try:
         response = lambda_client.invoke(
             FunctionName="KYCFastAPIFunctionExternal",
