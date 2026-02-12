@@ -159,6 +159,13 @@ def on_startup():
                 if not res:
                     conn.execute(text("ALTER TABLE muinmos_settings ADD COLUMN base_api_url VARCHAR NOT NULL DEFAULT ''"))
                     conn.commit()
+                
+                # Add is_popular column to service_prices if it doesn't exist
+                q = text("SELECT column_name FROM information_schema.columns WHERE table_name='service_prices' AND column_name='is_popular'")
+                res = conn.execute(q).scalar()
+                if not res:
+                    conn.execute(text("ALTER TABLE service_prices ADD COLUMN is_popular BOOLEAN NOT NULL DEFAULT false"))
+                    conn.commit()
     except Exception:
         pass
 
@@ -238,6 +245,7 @@ def list_service_prices(db: Session = Depends(get_db)):
             "currency": str(sp.currency),
             "currency_code": cur.currency_code,
             "currency_symbol": cur.currency_symbol,
+            "is_popular": sp.is_popular,
         }
         for sp, cur in rows
     ]
