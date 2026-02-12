@@ -1022,5 +1022,80 @@ def check_muinmos_assessment_to_send_kycpdf(db: Session):
         logger.exception("Error sending KYC PDFs")
         return {"error": str(e)}
 
+def update_order_assessment_iscomplete_sendpdfreport(event_type: str, assessment_id: str, reference_key: str, db: Session):
+    """Update assessment completion and send PDF report"""
+    # Step 1: Update is_complete if event_type is 0
+    if event_type == "0":
+        query = db.query(
+            OrderAssessment,
+            GuestAccount.email
+        ).join(
+            OrderPayment, OrderAssessment.order_payment_id == OrderPayment.order_payment_id
+        ).join(
+            GuestAccount, OrderPayment.guest_account_id == GuestAccount.guest_account_id
+        ).filter(
+            OrderAssessment.assessment_id == assessment_id,
+            OrderAssessment.reference_key == reference_key
+        )
+        
+        result = query.first()
+        
+        if not result:
+            return {"error": "Assessment not found"}
+        
+        oa, email = result
+        
+        # Check if already complete
+        if not oa.is_complete:
+            oa.is_complete = True
+            db.commit()
+        
+        # Check if PDF already sent
+        if oa.pdf_sent:
+            return {"status": "skipped", "reason": "PDF already sent"}
+        
+        # Step 2: Get Muinmos settings and token
+        settings = db.query(MuinmosSetting).filter(MuinmosSetting.is_used == True).first()
+        if not settings:
+            return {"error": "No active Muinmos settings found"}
+        
+        token_response = get_muinmos_token(db)
+        if "error" in token_response:
+            logger.error(f"Failed to get Muinmos token: {token_response}")
+            return token_response
+        
+        # Step 3: Invoke external Lambda
+        payload = {
+            "action": "send_muinmos_assessment_kycpdf_single_user",
+            "payload": {
+                "base_api_url": settings.base_api_url,
+                "token_type": token_response["token_type"],
+                "access_token": token_response["access_token"],
+                "email": email,
+                "assessment_id": str(oa.assessment_id)
+            }
+        }
+        
+        try:
+            response = lambda_client.invoke(
+                FunctionName="KYCFastAPIFunctionExternal",
+                InvocationType="RequestResponse",
+                Payload=_json.dumps(payload).encode("utf-8")
+            )
+            response_payload = _json.loads(response["Payload"].read().decode("utf-8"))
+            
+            if response_payload.get("success") and response_payload.get("is_pdf_sent"):
+                oa.pdf_sent = True
+                db.commit()
+                return {"status": "success", "pdf_sent": True}
+            else:
+                return {"status": "success", "pdf_sent": False, "details": response_payload}
+        
+        except Exception as e:
+            logger.exception("Error sending PDF report")
+            return {"error": str(e)}
+    
+    return {"status": "skipped", "reason": "event_type is not 0"}
+
 if Mangum:
     handler = Mangum(app, lifespan="off")
