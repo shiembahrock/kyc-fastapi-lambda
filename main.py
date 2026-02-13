@@ -25,6 +25,8 @@ import boto3
 import logging
 from enums import UsageStatus
 
+JWT_SECRET = os.getenv("JWT_SECRET", "")
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -1132,7 +1134,7 @@ def gen_login_token(email: str):
     """Generate JWT login token"""
     token = jwt.encode(
         {"email": email},
-        os.getenv("JWT_SECRET", "kycamlbyenigmatig-secret-key-minimum-32-chars"),
+        JWT_SECRET,
         algorithm="HS256"
     )
     return token
