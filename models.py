@@ -132,3 +132,20 @@ class OrderAssessment(Base):
     reference_key = Column(String(100))
     is_complete = Column(Boolean, nullable=False, default=False)
     pdf_sent = Column(Boolean, nullable=False, default=False)
+
+class GuestAccountOTP(Base):
+    __tablename__ = "guest_account_otps"
+    guest_account_otp_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    guest_account_id = Column(UUID(as_uuid=True), ForeignKey("guest_accounts.guest_account_id"), nullable=False)
+    requested_date = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expiry_date = Column(DateTime(timezone=True), nullable=False)
+    otp = Column(String(6))
+    is_logged_in = Column(Boolean, nullable=False, default=False)
+
+class GuestLoginSession(Base):
+    __tablename__ = "guest_login_sessions"
+    guest_login_session_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    guest_account_id = Column(UUID(as_uuid=True), ForeignKey("guest_accounts.guest_account_id"), nullable=False)
+    issued_on = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expiry_on = Column(DateTime(timezone=True), nullable=False)
+    token = Column(String(500), nullable=False)

@@ -1,14 +1,17 @@
 from fastapi import FastAPI, APIRouter, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from uuid import uuid4
 from pathlib import Path
 import json
+import random
+import jwt
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from db import Base, engine, SessionLocal
-from models import Order, ServicePrice, Currency, Country, OrderPayment, GuestAccount, StripeSetting, MuinmosSetting, MuinmosToken, OrderAssessment
+from models import Order, ServicePrice, Currency, Country, OrderPayment, GuestAccount, StripeSetting, MuinmosSetting, MuinmosToken, OrderAssessment, GuestAccountOTP, GuestLoginSession
 from decimal import Decimal
 import uuid as _uuid
 from datetime import datetime, timezone, timedelta
@@ -93,6 +96,15 @@ class OrderCreate(BaseModel):
     price: Optional[str] = None
     period: Optional[str] = None
     description: Optional[str] = None
+
+class LoginOTPRequest(BaseModel):
+    email: EmailStr
+    is_from_login: bool = False
+
+class SubmitOTPRequest(BaseModel):
+    email: EmailStr
+    otp: str
+
 class CheckoutStartRequest(BaseModel):
     email: EmailStr
     first_name: str
@@ -165,6 +177,13 @@ def on_startup():
                 res = conn.execute(q).scalar()
                 if not res:
                     conn.execute(text("ALTER TABLE service_prices ADD COLUMN is_popular BOOLEAN NOT NULL DEFAULT false"))
+                    conn.commit()
+                
+                # Alter token column in guest_login_sessions to VARCHAR(500)
+                q = text("SELECT character_maximum_length FROM information_schema.columns WHERE table_name='guest_login_sessions' AND column_name='token'")
+                res = conn.execute(q).scalar()
+                if res and res < 500:
+                    conn.execute(text("ALTER TABLE guest_login_sessions ALTER COLUMN token TYPE VARCHAR(500)"))
                     conn.commit()
     except Exception:
         pass
@@ -1104,6 +1123,169 @@ def update_order_assessment_iscomplete_sendpdfreport(event_type: str, assessment
             return {"error": str(e)}
     
     return {"status": "skipped", "reason": "event_type is not 0"}
+
+def gen_login_otp():
+    """Generate 4-digit OTP"""
+    return str(random.randint(1000, 9999))
+
+def gen_login_token(email: str):
+    """Generate JWT login token"""
+    token = jwt.encode(
+        {"email": email},
+        os.getenv("JWT_SECRET", "kycamlbyenigmatig-secret-key-minimum-32-chars"),
+        algorithm="HS256"
+    )
+    return token
+
+@app.post("/auth/email-get-otp")
+def login_with_email_generate_otp_endpoint(payload: LoginOTPRequest, db: Session = Depends(get_db)):
+    return login_with_email_generate_otp(payload.email, payload.is_from_login, db)
+
+@app.post("/auth/submit-otp")
+def login_submit_otp_endpoint(payload: SubmitOTPRequest, db: Session = Depends(get_db)):
+    return login_submit_otp(payload.email, payload.otp, db)
+
+def login_with_email_generate_otp(email: str, is_from_login: bool, db: Session):
+    """Generate and send OTP for email login"""
+    is_send_email = False
+    otp = gen_login_otp()
+    
+    # Get or create guest account
+    ga = db.query(GuestAccount).filter(GuestAccount.email == email).first()
+    
+    if ga:
+        # Check existing OTP
+        gaotp = db.query(GuestAccountOTP).filter(
+            GuestAccountOTP.guest_account_id == ga.guest_account_id
+        ).first()
+        
+        if gaotp:
+            now = datetime.now(timezone.utc)
+            if gaotp.expiry_date <= now or is_from_login:
+                gaotp.requested_date = datetime.now(timezone.utc)
+                gaotp.otp = otp
+                gaotp.expiry_date = datetime.now(timezone.utc) + timedelta(minutes=5)
+                db.commit()
+                is_send_email = True
+        else:
+            now = datetime.now(timezone.utc)
+            gaotp = GuestAccountOTP(
+                guest_account_id=ga.guest_account_id,
+                requested_date=now,
+                otp=otp,
+                expiry_date=now + timedelta(minutes=5)
+            )
+            db.add(gaotp)
+            db.commit()
+            is_send_email = True
+    else:
+        ga = GuestAccount(email=email)
+        db.add(ga)
+        db.flush()
+        
+        now = datetime.now(timezone.utc)
+        gaotp = GuestAccountOTP(
+            guest_account_id=ga.guest_account_id,
+            requested_date=now,
+            otp=otp,
+            expiry_date=now + timedelta(minutes=5)
+        )
+        db.add(gaotp)
+        db.commit()
+        is_send_email = True
+    
+    # Send email if needed
+    if is_send_email:
+        payload = {
+            "action": "send_email_smtp",
+            "payload": {
+                "to_email": ga.email,
+                "subject": f"Enigmatig KYC & AML - {otp} is your personal code.",
+                "body": f"Hi,<br/><br/>Your personal unique code is: {otp}.<br/>Please type your code into the login box to connect to your account.",
+                "is_html": True
+            }
+        }
+        
+        try:
+            lambda_client.invoke(
+                FunctionName="KYCFastAPIFunctionExternal",
+                InvocationType="RequestResponse",
+                Payload=_json.dumps(payload).encode("utf-8")
+            )
+        except Exception as e:
+            logger.exception("Error sending OTP email")
+    
+    return {"guest_account_id": str(ga.guest_account_id)}
+
+def login_submit_otp(email: str, otp: str, db: Session):
+    """Submit OTP and generate login token"""
+    # Get guest account
+    ga = db.query(GuestAccount).filter(GuestAccount.email == email).first()
+    
+    if not ga:
+        return JSONResponse(
+            status_code=401,
+            content={"message": "The account is not found."}
+        )
+    
+    # Get OTP record
+    gaotp = db.query(GuestAccountOTP).filter(
+        GuestAccountOTP.guest_account_id == ga.guest_account_id
+    ).first()
+    
+    if not gaotp:
+        return JSONResponse(
+            status_code=410,
+            content={"message": "The code is incorrect. Please check your email."}
+        )
+    
+    # Check OTP match
+    if gaotp.otp != otp:
+        return JSONResponse(
+            status_code=410,
+            content={"message": "The code is incorrect. Please check your email."}
+        )
+    
+    # Check expiry
+    now = datetime.now(timezone.utc)
+    if gaotp.expiry_date < now:
+        return JSONResponse(
+            status_code=410,
+            content={"message": "OTP has been expired."}
+        )
+    
+    # Generate token
+    token = gen_login_token(email)
+    expiry_on = now + timedelta(hours=24)
+    
+    # Update or create login session
+    gls = db.query(GuestLoginSession).filter(
+        GuestLoginSession.guest_account_id == ga.guest_account_id
+    ).first()
+    
+    if gls:
+        gls.issued_on = now
+        gls.expiry_on = expiry_on
+        gls.token = token
+    else:
+        gls = GuestLoginSession(
+            guest_account_id=ga.guest_account_id,
+            issued_on=now,
+            expiry_on=expiry_on,
+            token=token
+        )
+        db.add(gls)
+    
+    db.commit()
+    
+    # Calculate expiry_on in Unix timestamp (seconds)
+    expiry_timestamp = int(expiry_on.timestamp())
+    
+    return {
+        "message": "Success.",
+        "token": token,
+        "expiry_on": expiry_timestamp
+    }
 
 if Mangum:
     handler = Mangum(app, lifespan="off")
