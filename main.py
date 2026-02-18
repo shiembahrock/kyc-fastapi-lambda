@@ -26,6 +26,7 @@ import logging
 from enums import UsageStatus
 
 JWT_SECRET = os.getenv("JWT_SECRET", "")
+WEBHOOK_TARGET_LAMBDA_ARN = os.getenv("WEBHOOK_TARGET_LAMBDA_ARN", "")
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -328,21 +329,26 @@ def checkout_start(payload: CheckoutStartRequest, db: Session = Depends(get_db))
     }
 
     # Invoke an external (non-VPC) Lambda to perform the Stripe Checkout session creation
-    lambda_payload = {"action": "create_checkout_session", "payload": form}
-    try:
-        response = lambda_client.invoke(
-            FunctionName="KYCFastAPIFunctionExternal",
-            InvocationType="RequestResponse",
-            Payload=_json.dumps(lambda_payload).encode("utf-8"),
-        )
-    except Exception as e:
-        logger.exception("checkout: lambda invoke error")
+    if WEBHOOK_TARGET_LAMBDA_ARN:
+        lambda_payload = {"action": "create_checkout_session", "payload": form}
+        try:
+            response = lambda_client.invoke(
+                FunctionName=WEBHOOK_TARGET_LAMBDA_ARN,
+                InvocationType="RequestResponse",
+                Payload=_json.dumps(lambda_payload).encode("utf-8"),
+            )
+        except Exception as e:
+            logger.exception("checkout: lambda invoke error")
+            db.rollback()
+            return {
+                "status_code": 500,
+                "error_message": "Error invoking external payment service",
+                "details": str(e),
+            }
+    else:
+        logger.warning("checkout: WEBHOOK_TARGET_LAMBDA_ARN not set")
         db.rollback()
-        return {
-            "status_code": 500,
-            "error_message": "Error invoking external payment service",
-            "details": str(e),
-        }
+        return {"status_code": 500, "error_message": "External payment service not configured"}
 
     # 1. Read streaming payload
     payload_bytes = response["Payload"].read()
@@ -450,20 +456,23 @@ def checkout_start(payload: CheckoutStartRequest, db: Session = Depends(get_db))
            "Country : " + (cn.country_name if cn else "")
 
     # Invoke an external (non-VPC) Lambda to perform the Send Email action
-    send_email_payload = {"action": "send_email_smtp", "payload": {"to_email": payload.email, "subject": subject, "body": body, "is_html": False}}
-    try:
-        response = lambda_client.invoke(
-            FunctionName="KYCFastAPIFunctionExternal",
-            InvocationType="RequestResponse",
-            Payload=_json.dumps(send_email_payload).encode("utf-8"),
-        )
-    except Exception as e:
-        logger.exception("send_email: lambda invoke error")
-        return {
-            "status_code": 500,
-            "error_message": "Error invoking external payment service",
-            "details": str(e),
-        }
+    if WEBHOOK_TARGET_LAMBDA_ARN:
+        send_email_payload = {"action": "send_email_smtp", "payload": {"to_email": payload.email, "subject": subject, "body": body, "is_html": False}}
+        try:
+            response = lambda_client.invoke(
+                FunctionName=WEBHOOK_TARGET_LAMBDA_ARN,
+                InvocationType="RequestResponse",
+                Payload=_json.dumps(send_email_payload).encode("utf-8"),
+            )
+        except Exception as e:
+            logger.exception("send_email: lambda invoke error")
+            return {
+                "status_code": 500,
+                "error_message": "Error invoking external payment service",
+                "details": str(e),
+            }
+    else:
+        logger.warning("send_email: WEBHOOK_TARGET_LAMBDA_ARN not set; skipping email")
 
     return {
         "status_code": 200,
@@ -706,9 +715,13 @@ def get_muinmos_token(db: Session = Depends(get_db)):
         }
     }
     
+    if not WEBHOOK_TARGET_LAMBDA_ARN:
+        logger.warning("get_muinmos_token: WEBHOOK_TARGET_LAMBDA_ARN not set")
+        return {"error": "External service not configured"}
+    
     try:
         response = lambda_client.invoke(
-            FunctionName="KYCFastAPIFunctionExternal",
+            FunctionName=WEBHOOK_TARGET_LAMBDA_ARN,
             InvocationType="RequestResponse",
             Payload=_json.dumps(payload).encode("utf-8")
         )
@@ -821,9 +834,13 @@ def create_assessment(user_email: str, order_code: str, db: Session):
         }
     }
     
+    if not WEBHOOK_TARGET_LAMBDA_ARN:
+        logger.warning("create_assessment: WEBHOOK_TARGET_LAMBDA_ARN not set")
+        return {"error": "External service not configured"}
+    
     try:
         response = lambda_client.invoke(
-            FunctionName="KYCFastAPIFunctionExternal",
+            FunctionName=WEBHOOK_TARGET_LAMBDA_ARN,
             InvocationType="RequestResponse",
             Payload=_json.dumps(payload).encode("utf-8")
         )
@@ -903,9 +920,13 @@ def muinmos_assessment_check(db: Session):
         }
     }
     
+    if not WEBHOOK_TARGET_LAMBDA_ARN:
+        logger.warning("muinmos_assessment_check: WEBHOOK_TARGET_LAMBDA_ARN not set")
+        return {"error": "External service not configured"}
+    
     try:
         response = lambda_client.invoke(
-            FunctionName="KYCFastAPIFunctionExternal",
+            FunctionName=WEBHOOK_TARGET_LAMBDA_ARN,
             InvocationType="RequestResponse",
             Payload=_json.dumps(payload).encode("utf-8")
         )
@@ -1016,9 +1037,13 @@ def check_muinmos_assessment_to_send_kycpdf(db: Session):
         }
     }
     
+    if not WEBHOOK_TARGET_LAMBDA_ARN:
+        logger.warning("check_muinmos_assessment_to_send_kycpdf: WEBHOOK_TARGET_LAMBDA_ARN not set")
+        return {"error": "External service not configured"}
+    
     try:
         response = lambda_client.invoke(
-            FunctionName="KYCFastAPIFunctionExternal",
+            FunctionName=WEBHOOK_TARGET_LAMBDA_ARN,
             InvocationType="RequestResponse",
             Payload=_json.dumps(payload).encode("utf-8")
         )
@@ -1105,9 +1130,13 @@ def update_order_assessment_iscomplete_sendpdfreport(event_type: str, assessment
             }
         }
         
+        if not WEBHOOK_TARGET_LAMBDA_ARN:
+            logger.warning("update_order_assessment: WEBHOOK_TARGET_LAMBDA_ARN not set")
+            return {"error": "External service not configured"}
+        
         try:
             response = lambda_client.invoke(
-                FunctionName="KYCFastAPIFunctionExternal",
+                FunctionName=WEBHOOK_TARGET_LAMBDA_ARN,
                 InvocationType="RequestResponse",
                 Payload=_json.dumps(payload).encode("utf-8")
             )
@@ -1198,24 +1227,27 @@ def login_with_email_generate_otp(email: str, is_from_login: bool, db: Session):
     
     # Send email if needed
     if is_send_email:
-        payload = {
-            "action": "send_email_smtp",
-            "payload": {
-                "to_email": ga.email,
-                "subject": f"Enigmatig KYC & AML - {otp} is your personal code.",
-                "body": f"Hi,<br/><br/>Your personal unique code is: {otp}.<br/>Please type your code into the login box to connect to your account.",
-                "is_html": True
+        if WEBHOOK_TARGET_LAMBDA_ARN:
+            payload = {
+                "action": "send_email_smtp",
+                "payload": {
+                    "to_email": ga.email,
+                    "subject": f"Enigmatig KYC & AML - {otp} is your personal code.",
+                    "body": f"Hi,<br/><br/>Your personal unique code is: {otp}.<br/>Please type your code into the login box to connect to your account.",
+                    "is_html": True
+                }
             }
-        }
-        
-        try:
-            lambda_client.invoke(
-                FunctionName="KYCFastAPIFunctionExternal",
-                InvocationType="RequestResponse",
-                Payload=_json.dumps(payload).encode("utf-8")
-            )
-        except Exception as e:
-            logger.exception("Error sending OTP email")
+            
+            try:
+                lambda_client.invoke(
+                    FunctionName=WEBHOOK_TARGET_LAMBDA_ARN,
+                    InvocationType="RequestResponse",
+                    Payload=_json.dumps(payload).encode("utf-8")
+                )
+            except Exception as e:
+                logger.exception("Error sending OTP email")
+        else:
+            logger.warning("login_with_email_generate_otp: WEBHOOK_TARGET_LAMBDA_ARN not set; skipping OTP email")
     
     return {"guest_account_id": str(ga.guest_account_id)}
 
