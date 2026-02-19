@@ -149,3 +149,15 @@ class GuestLoginSession(Base):
     issued_on = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     expiry_on = Column(DateTime(timezone=True), nullable=False)
     token = Column(String(500), nullable=False)
+
+class SearchHistory(Base):
+    __tablename__ = "search_histories"
+    search_history_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    created_date = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    order_assessment_id = Column(UUID(as_uuid=True), ForeignKey("order_assessments.order_assessment_id"), nullable=False)
+    completed_time = Column(DateTime(timezone=True), nullable=True)
+    first_name = Column(String(100), nullable=True)
+    middle_name = Column(String(100), nullable=True)
+    last_name = Column(String(100), nullable=True)
+    dob = Column(DateTime(timezone=True), nullable=True)
+    rag_result = Column(String, nullable=False)

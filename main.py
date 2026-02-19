@@ -11,7 +11,7 @@ import jwt
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from db import Base, engine, SessionLocal
-from models import Order, ServicePrice, Currency, Country, OrderPayment, GuestAccount, StripeSetting, MuinmosSetting, MuinmosToken, OrderAssessment, GuestAccountOTP, GuestLoginSession
+from models import Order, ServicePrice, Currency, Country, OrderPayment, GuestAccount, StripeSetting, MuinmosSetting, MuinmosToken, OrderAssessment, GuestAccountOTP, GuestLoginSession, SearchHistory
 from decimal import Decimal
 import uuid as _uuid
 from datetime import datetime, timezone, timedelta
@@ -1104,6 +1104,12 @@ def update_order_assessment_iscomplete_sendpdfreport(event_type: str, assessment
             oa.is_complete = True
             db.commit()
         
+        # Create search history
+        try:
+            create_search_history(str(oa.assessment_id), db)
+        except Exception:
+            logger.exception("Failed to create search history")
+        
         # Check if PDF already sent
         if oa.pdf_sent:
             return {"status": "skipped", "reason": "PDF already sent"}
@@ -1320,6 +1326,83 @@ def login_submit_otp(email: str, otp: str, db: Session):
         "token": token,
         "expiry_on": expiry_timestamp
     }
+
+def create_search_history(assessment_id: str, db: Session):
+    """Create search history record"""
+    oa = db.query(OrderAssessment).filter(OrderAssessment.assessment_id == assessment_id).first()
+    if not oa:
+        return {"error": "Assessment not found"}
+    
+    settings = db.query(MuinmosSetting).filter(MuinmosSetting.is_used == True).first()
+    if not settings:
+        return {"error": "No active Muinmos settings found"}
+    
+    token_response = get_muinmos_token(db)
+    if "error" in token_response:
+        return token_response
+    
+    payload = {
+        "action": "get_muinmos_assessment_result",
+        "payload": {
+            "base_api_url": settings.base_api_url,
+            "token_type": token_response["token_type"],
+            "access_token": token_response["access_token"],
+            "assessment_id": assessment_id
+        }
+    }
+    
+    if not WEBHOOK_TARGET_LAMBDA_ARN:
+        logger.warning("create_search_history: WEBHOOK_TARGET_LAMBDA_ARN not set")
+        return {"error": "External service not configured"}
+    
+    try:
+        response = lambda_client.invoke(
+            FunctionName=WEBHOOK_TARGET_LAMBDA_ARN,
+            InvocationType="RequestResponse",
+            Payload=_json.dumps(payload).encode("utf-8")
+        )
+        response_payload = _json.loads(response["Payload"].read().decode("utf-8"))
+        
+        if not response_payload.get("success"):
+            return {"error": "Failed to get assessment result", "details": response_payload}
+        
+        completed_time = response_payload.get("completed_time")
+        rag_result = response_payload.get("ragResult", "")
+        answers = response_payload.get("answers", {})
+        
+        completed_dt = None
+        if completed_time:
+            try:
+                completed_dt = datetime.fromisoformat(completed_time.replace("Z", "+00:00"))
+            except Exception:
+                pass
+        
+        dob_dt = None
+        if answers.get("dob"):
+            try:
+                dob_dt = datetime.fromisoformat(answers["dob"].replace("Z", "+00:00"))
+            except Exception:
+                pass
+        
+        sh = SearchHistory(
+            order_assessment_id=oa.order_assessment_id,
+            completed_time=completed_dt,
+            first_name=answers.get("first_name"),
+            middle_name=answers.get("middle_name"),
+            last_name=answers.get("last_name"),
+            dob=dob_dt,
+            rag_result=rag_result
+        )
+        db.add(sh)
+        db.commit()
+        db.refresh(sh)
+        
+        return {"search_history_id": str(sh.search_history_id)}
+    
+    except Exception as e:
+        logger.exception("Error creating search history")
+        db.rollback()
+        return {"error": str(e)}
 
 if Mangum:
     handler = Mangum(app, lifespan="off")
