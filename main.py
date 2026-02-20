@@ -148,6 +148,13 @@ class GetOrderPaymentsByGuestAccountRequest(BaseModel):
     page_size: int = 10
     page_number: int = 1
 
+class GetSearchHistoriesByGuestAccountRequest(BaseModel):
+    guest_account_id: str
+    sort_by: str = "completed_time"
+    is_desc: bool = True
+    page_size: int = 10
+    page_number: int = 1
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to KYC Backend API"}
@@ -1608,6 +1615,89 @@ def get_order_payments_by_guest_account(guest_account_id: str, guest_account_tok
                 "payment_status": row.payment_status,
                 "checkout_url": row.checkout_url,
                 "psp_stripe_receipt_url": row.psp_stripe_receipt_url
+            }
+            for row in results
+        ]
+        
+        is_has_more = (page_number * page_size) < total_count
+        
+        return JSONResponse(status_code=200, content={
+            "token_expiry_on": auth_result["expiry_on"],
+            "data_list": data_list,
+            "total_count": total_count,
+            "is_has_more": is_has_more,
+            "current_page_number": page_number
+        })
+    else:
+        return JSONResponse(status_code=401, content={"message": "unauthorized"})
+
+@app.post("/guest-account/search-histories")
+def get_search_histories_by_guest_account_id_endpoint(request: Request, payload: GetSearchHistoriesByGuestAccountRequest, db: Session = Depends(get_db)):
+    guest_account_token = request.headers.get("GuestAccountToken", "")
+    return get_search_histories_by_guest_account_id(
+        payload.guest_account_id,
+        guest_account_token,
+        payload.sort_by,
+        payload.is_desc,
+        payload.page_size,
+        payload.page_number,
+        db
+    )
+
+def get_search_histories_by_guest_account_id(guest_account_id: str, guest_account_token: str, sort_by: str, is_desc: bool, page_size: int, page_number: int, db: Session):
+    """Get search histories by guest account with pagination"""
+    auth_result = auth_validation_by_token_and_guest_account_id(guest_account_id, guest_account_token, db)
+    
+    if auth_result["auth_status"] == "valid":
+        # Step 1: Get total count
+        total_count = db.query(SearchHistory).join(
+            OrderAssessment, SearchHistory.order_assessment_id == OrderAssessment.order_assessment_id
+        ).join(
+            OrderPayment, OrderAssessment.order_payment_id == OrderPayment.order_payment_id
+        ).join(
+            GuestAccount, OrderPayment.guest_account_id == GuestAccount.guest_account_id
+        ).filter(
+            GuestAccount.guest_account_id == guest_account_id
+        ).count()
+        
+        # Step 2: Get paginated data with join
+        sort_column = getattr(SearchHistory, sort_by, SearchHistory.completed_time)
+        query = db.query(
+            SearchHistory.completed_time,
+            OrderAssessment.reference_key,
+            SearchHistory.first_name,
+            SearchHistory.middle_name,
+            SearchHistory.last_name,
+            SearchHistory.dob,
+            SearchHistory.rag_result,
+            OrderAssessment.pdf_sent
+        ).join(
+            OrderAssessment, SearchHistory.order_assessment_id == OrderAssessment.order_assessment_id
+        ).join(
+            OrderPayment, OrderAssessment.order_payment_id == OrderPayment.order_payment_id
+        ).join(
+            GuestAccount, OrderPayment.guest_account_id == GuestAccount.guest_account_id
+        ).filter(
+            GuestAccount.guest_account_id == guest_account_id
+        )
+        
+        if is_desc:
+            query = query.order_by(sort_column.desc())
+        else:
+            query = query.order_by(sort_column.asc())
+        
+        results = query.offset((page_number - 1) * page_size).limit(page_size).all()
+        
+        data_list = [
+            {
+                "completed_time": row.completed_time.isoformat() if row.completed_time else None,
+                "reference_key": row.reference_key,
+                "first_name": row.first_name,
+                "middle_name": row.middle_name,
+                "last_name": row.last_name,
+                "dob": row.dob.isoformat() if row.dob else None,
+                "rag_result": row.rag_result,
+                "pdf_sent": row.pdf_sent
             }
             for row in results
         ]
