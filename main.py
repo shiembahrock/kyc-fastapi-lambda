@@ -26,7 +26,7 @@ import logging
 from enums import UsageStatus
 
 JWT_SECRET = os.getenv("JWT_SECRET", "")
-WEBHOOK_TARGET_LAMBDA_ARN = os.getenv("WEBHOOK_TARGET_LAMBDA_ARN", "")
+WEBHOOK_TARGET_LAMBDA_ARN = os.getenv("WEBHOOK_TARGET_LAMBDA_ARN", "KYCFastAPIFunctionExternal")
 LOGIN_EXPIRY_MINUTES = int(os.getenv("LOGIN_EXPIRY_MINUTES", "60"))
 
 logger = logging.getLogger()
@@ -140,6 +140,13 @@ class UpdateGuestAccountNotificationSettingsRequest(BaseModel):
     guest_account_id: str
     column_name: str
     column_value: bool
+
+class GetOrderPaymentsByGuestAccountRequest(BaseModel):
+    guest_account_id: str
+    sort_by: str = "transaction_date"
+    is_desc: bool = True
+    page_size: int = 10
+    page_number: int = 1
 
 @app.get("/")
 def read_root():
@@ -1538,6 +1545,82 @@ def update_guest_account_notification_settings(guest_account_id: str, guest_acco
                 return JSONResponse(status_code=408, content={"message": "timeout", "token_expiry_on": auth_result["expiry_on"]})
             else:
                 return JSONResponse(status_code=500, content={"message": "failed", "token_expiry_on": auth_result["expiry_on"]})
+    else:
+        return JSONResponse(status_code=401, content={"message": "unauthorized"})
+
+@app.post("/guest-account/order-payments")
+def get_order_payments_by_guest_account_endpoint(request: Request, payload: GetOrderPaymentsByGuestAccountRequest, db: Session = Depends(get_db)):
+    guest_account_token = request.headers.get("GuestAccountToken", "")
+    logger.info(f"get_order_payments_by_guest_account_endpoint called with guest_account_id: {payload.guest_account_id}, sort_by: {payload.sort_by}, is_desc: {payload.is_desc}, page_size: {payload.page_size}, page_number: {payload.page_number}")
+    return get_order_payments_by_guest_account(
+        payload.guest_account_id,
+        guest_account_token,
+        payload.sort_by,
+        payload.is_desc,
+        payload.page_size,
+        payload.page_number,
+        db
+    )
+
+def get_order_payments_by_guest_account(guest_account_id: str, guest_account_token: str, sort_by: str, is_desc: bool, page_size: int, page_number: int, db: Session):
+    """Get order payments by guest account with pagination"""
+    auth_result = auth_validation_by_token_and_guest_account_id(guest_account_id, guest_account_token, db)
+    
+    if auth_result["auth_status"] == "valid":
+        # Step 1: Get total count (no join needed)
+        total_count = db.query(OrderPayment).filter(
+            OrderPayment.guest_account_id == guest_account_id
+        ).count()
+        
+        # Step 2: Get paginated data with join
+        sort_column = getattr(OrderPayment, sort_by, OrderPayment.transaction_date)
+        query = db.query(
+            OrderPayment.transaction_date,
+            OrderPayment.transaction_expired_date,
+            OrderPayment.service_id_ordered,
+            ServicePrice.service_name,
+            OrderPayment.order_code,
+            OrderPayment.usage_status,
+            OrderPayment.payment_status,
+            OrderPayment.checkout_url,
+            OrderPayment.psp_stripe_receipt_url
+        ).join(
+            ServicePrice, OrderPayment.service_id_ordered == ServicePrice.service_price_id
+        ).filter(
+            OrderPayment.guest_account_id == guest_account_id
+        )
+        
+        if is_desc:
+            query = query.order_by(sort_column.desc())
+        else:
+            query = query.order_by(sort_column.asc())
+        
+        results = query.offset((page_number - 1) * page_size).limit(page_size).all()
+        
+        data_list = [
+            {
+                "transaction_date": row.transaction_date.isoformat() if row.transaction_date else None,
+                "transaction_expired_date": row.transaction_expired_date.isoformat() if row.transaction_expired_date else None,
+                "service_id_ordered": str(row.service_id_ordered) if row.service_id_ordered else None,
+                "service_name": row.service_name,
+                "order_code": row.order_code,
+                "usage_status": row.usage_status,
+                "payment_status": row.payment_status,
+                "checkout_url": row.checkout_url,
+                "psp_stripe_receipt_url": row.psp_stripe_receipt_url
+            }
+            for row in results
+        ]
+        
+        is_has_more = (page_number * page_size) < total_count
+        
+        return JSONResponse(status_code=200, content={
+            "token_expiry_on": auth_result["expiry_on"],
+            "data_list": data_list,
+            "total_count": total_count,
+            "is_has_more": is_has_more,
+            "current_page_number": page_number
+        })
     else:
         return JSONResponse(status_code=401, content={"message": "unauthorized"})
 
