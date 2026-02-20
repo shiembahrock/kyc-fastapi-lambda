@@ -161,3 +161,12 @@ class SearchHistory(Base):
     last_name = Column(String(100), nullable=True)
     dob = Column(DateTime(timezone=True), nullable=True)
     rag_result = Column(String, nullable=False)
+
+class GuestAccountNotificationSetting(Base):
+    __tablename__ = "guest_account_notification_settings"
+    guest_account_notification_setting_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    guest_account_id = Column(UUID(as_uuid=True), ForeignKey("guest_accounts.guest_account_id"), nullable=False)
+    email_promotion_subscription = Column(Boolean, nullable=False, default=False)
+    email_system_messages = Column(Boolean, nullable=False, default=False)
+    phone_promotion_subscription = Column(Boolean, nullable=False, default=False)
+    sms_system_messages = Column(Boolean, nullable=False, default=False)

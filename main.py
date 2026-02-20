@@ -11,7 +11,7 @@ import jwt
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from db import Base, engine, SessionLocal
-from models import Order, ServicePrice, Currency, Country, OrderPayment, GuestAccount, StripeSetting, MuinmosSetting, MuinmosToken, OrderAssessment, GuestAccountOTP, GuestLoginSession, SearchHistory
+from models import Order, ServicePrice, Currency, Country, OrderPayment, GuestAccount, StripeSetting, MuinmosSetting, MuinmosToken, OrderAssessment, GuestAccountOTP, GuestLoginSession, SearchHistory, GuestAccountNotificationSetting
 from decimal import Decimal
 import uuid as _uuid
 from datetime import datetime, timezone, timedelta
@@ -27,6 +27,7 @@ from enums import UsageStatus
 
 JWT_SECRET = os.getenv("JWT_SECRET", "")
 WEBHOOK_TARGET_LAMBDA_ARN = os.getenv("WEBHOOK_TARGET_LAMBDA_ARN", "")
+LOGIN_EXPIRY_MINUTES = int(os.getenv("LOGIN_EXPIRY_MINUTES", "60"))
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -120,6 +121,25 @@ class CheckoutStartRequest(BaseModel):
     currency_code: str
     cancel_url: str
     success_url: str
+
+class GuestAccountProfileRequest(BaseModel):
+    guest_account_id: str
+
+class UpdateGuestAccountProfileRequest(BaseModel):
+    guest_account_id: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    country_id: Optional[str] = None
+    phone: Optional[str] = None
+    company_name: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    zip_postal_code: Optional[str] = None
+
+class UpdateGuestAccountNotificationSettingsRequest(BaseModel):
+    guest_account_id: str
+    column_name: str
+    column_value: bool
 
 @app.get("/")
 def read_root():
@@ -288,6 +308,10 @@ def checkout_start(payload: CheckoutStartRequest, db: Session = Depends(get_db))
         )
         db.add(g)
         db.flush()
+        
+        # Auto-create notification settings
+        gans = GuestAccountNotificationSetting(guest_account_id=g.guest_account_id)
+        db.add(gans)
     order_code = _gen_order_code()
     op = OrderPayment(
         service_id_ordered=payload.service_id,
@@ -1220,6 +1244,10 @@ def login_with_email_generate_otp(email: str, is_from_login: bool, db: Session):
         db.add(ga)
         db.flush()
         
+        # Auto-create notification settings
+        gans = GuestAccountNotificationSetting(guest_account_id=ga.guest_account_id)
+        db.add(gans)
+        
         now = datetime.now(timezone.utc)
         gaotp = GuestAccountOTP(
             guest_account_id=ga.guest_account_id,
@@ -1326,6 +1354,192 @@ def login_submit_otp(email: str, otp: str, db: Session):
         "token": token,
         "expiry_on": expiry_timestamp
     }
+
+def auth_validation_by_token_and_guest_account_id(guest_account_id: str, token: str, db: Session):
+    """Validate authentication token and extend expiry if valid"""
+    result = {
+        "auth_status": "",
+        "token": token,
+        "expiry_on": ""
+    }
+    
+    gls = db.query(GuestLoginSession).filter(
+        GuestLoginSession.guest_account_id == guest_account_id,
+        GuestLoginSession.token == token
+    ).first()
+    
+    if not gls:
+        result["auth_status"] = "not found"
+    else:
+        now = datetime.now(timezone.utc)
+        if gls.expiry_on > now:
+            expiry_on = now + timedelta(minutes=LOGIN_EXPIRY_MINUTES)
+            gls.expiry_on = expiry_on
+            db.commit()
+            result["auth_status"] = "valid"
+            result["expiry_on"] = int(expiry_on.timestamp())
+        else:
+            result["auth_status"] = "expired"
+            result["expiry_on"] = int(gls.expiry_on.timestamp())
+    
+    return result
+
+@app.post("/guest-account/profile")
+def get_guest_account_profile_endpoint(request: Request, payload: GuestAccountProfileRequest, db: Session = Depends(get_db)):
+    guest_account_token = request.headers.get("GuestAccountToken", "")
+    return get_guest_account_profile(payload.guest_account_id, guest_account_token, db)
+
+def get_guest_account_profile(guest_account_id: str, guest_account_token: str, db: Session):
+    """Get guest account profile with notification settings"""
+    auth_result = auth_validation_by_token_and_guest_account_id(guest_account_id, guest_account_token, db)
+    
+    if auth_result["auth_status"] == "valid":
+        ga = db.query(GuestAccount).filter(GuestAccount.guest_account_id == guest_account_id).first()
+        
+        if ga:
+            gans = db.query(GuestAccountNotificationSetting).filter(
+                GuestAccountNotificationSetting.guest_account_id == guest_account_id
+            ).first()
+            
+            guest_account_result = {
+                "message": "success",
+                "token_expiry_on": auth_result["expiry_on"],
+                "guest_account": {
+                    "guest_account_id": str(ga.guest_account_id),
+                    "email": ga.email,
+                    "first_name": ga.first_name,
+                    "last_name": ga.last_name,
+                    "company_name": ga.company_name,
+                    "country_id": str(ga.country_id) if ga.country_id else None,
+                    "address": ga.address,
+                    "city": ga.city,
+                    "zip_postal_code": ga.zip_postal_code,
+                    "phone": ga.phone,
+                    "created_at": ga.created_at.isoformat() if ga.created_at else None
+                }
+            }
+            
+            if gans:
+                guest_account_result["guest_account_notification_setting"] = {
+                    "guest_account_notification_setting_id": str(gans.guest_account_notification_setting_id),
+                    "guest_account_id": str(gans.guest_account_id),
+                    "email_promotion_subscription": gans.email_promotion_subscription,
+                    "email_system_messages": gans.email_system_messages,
+                    "phone_promotion_subscription": gans.phone_promotion_subscription,
+                    "sms_system_messages": gans.sms_system_messages
+                }
+            
+            return JSONResponse(status_code=200, content=guest_account_result)
+        else:
+            return JSONResponse(status_code=500, content={"message": "guest_account_id is not founded"})
+    else:
+        return JSONResponse(status_code=500, content={"message": "unauthorized"})
+
+@app.post("/guest-account/update-profile")
+def update_guest_account_profile_endpoint(request: Request, payload: UpdateGuestAccountProfileRequest, db: Session = Depends(get_db)):
+    guest_account_token = request.headers.get("GuestAccountToken", "")
+    return update_guest_account_profile(
+        payload.guest_account_id,
+        guest_account_token,
+        payload.first_name,
+        payload.last_name,
+        payload.country_id,
+        payload.phone,
+        payload.company_name,
+        payload.address,
+        payload.city,
+        payload.zip_postal_code,
+        db
+    )
+
+def update_guest_account_profile(guest_account_id: str, guest_account_token: str, first_name: str, last_name: str, country_id: str, phone: str, company_name: str, address: str, city: str, zip_postal_code: str, db: Session):
+    """Update guest account profile"""
+    auth_result = auth_validation_by_token_and_guest_account_id(guest_account_id, guest_account_token, db)
+    
+    if auth_result["auth_status"] == "valid":
+        try:
+            ga = db.query(GuestAccount).filter(GuestAccount.guest_account_id == guest_account_id).first()
+            
+            if not ga:
+                return JSONResponse(status_code=500, content={"message": "failed", "token_expiry_on": auth_result["expiry_on"]})
+            
+            if first_name is not None:
+                ga.first_name = first_name
+            if last_name is not None:
+                ga.last_name = last_name
+            if country_id is not None:
+                ga.country_id = country_id
+            if phone is not None:
+                ga.phone = phone
+            if company_name is not None:
+                ga.company_name = company_name
+            if address is not None:
+                ga.address = address
+            if city is not None:
+                ga.city = city
+            if zip_postal_code is not None:
+                ga.zip_postal_code = zip_postal_code
+            
+            db.commit()
+            
+            return JSONResponse(status_code=200, content={"message": "success", "token_expiry_on": auth_result["expiry_on"]})
+        
+        except Exception as e:
+            db.rollback()
+            logger.exception("Error updating guest account profile")
+            if "timeout" in str(e).lower():
+                return JSONResponse(status_code=408, content={"message": "timeout", "token_expiry_on": auth_result["expiry_on"]})
+            else:
+                return JSONResponse(status_code=500, content={"message": "failed", "token_expiry_on": auth_result["expiry_on"]})
+    else:
+        return JSONResponse(status_code=401, content={"message": "unauthorized"})
+
+@app.post("/guest-account/update-notification-settings")
+def update_guest_account_notification_settings_endpoint(request: Request, payload: UpdateGuestAccountNotificationSettingsRequest, db: Session = Depends(get_db)):
+    guest_account_token = request.headers.get("GuestAccountToken", "")
+    return update_guest_account_notification_settings(
+        payload.guest_account_id,
+        guest_account_token,
+        payload.column_name,
+        payload.column_value,
+        db
+    )
+
+def update_guest_account_notification_settings(guest_account_id: str, guest_account_token: str, column_name: str, column_value: bool, db: Session):
+    """Update guest account notification settings"""
+    # Get or create notification settings
+    gans = db.query(GuestAccountNotificationSetting).filter(
+        GuestAccountNotificationSetting.guest_account_id == guest_account_id
+    ).first()
+    
+    if not gans:
+        gans = GuestAccountNotificationSetting(
+            guest_account_id=guest_account_id,
+            email_promotion_subscription=False,
+            email_system_messages=False,
+            phone_promotion_subscription=False,
+            sms_system_messages=False
+        )
+        setattr(gans, column_name, column_value)
+        db.add(gans)
+        db.commit()
+    
+    auth_result = auth_validation_by_token_and_guest_account_id(guest_account_id, guest_account_token, db)
+    
+    if auth_result["auth_status"] == "valid":
+        try:
+            setattr(gans, column_name, column_value)
+            db.commit()
+            return JSONResponse(status_code=200, content={"message": "success", "token_expiry_on": auth_result["expiry_on"]})
+        except Exception as e:
+            db.rollback()
+            logger.exception("Error updating notification settings")
+            if "timeout" in str(e).lower():
+                return JSONResponse(status_code=408, content={"message": "timeout", "token_expiry_on": auth_result["expiry_on"]})
+            else:
+                return JSONResponse(status_code=500, content={"message": "failed", "token_expiry_on": auth_result["expiry_on"]})
+    else:
+        return JSONResponse(status_code=401, content={"message": "unauthorized"})
 
 def create_search_history(assessment_id: str, db: Session):
     """Create search history record"""
