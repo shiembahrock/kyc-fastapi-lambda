@@ -125,6 +125,9 @@ class CheckoutStartRequest(BaseModel):
 class GuestAccountProfileRequest(BaseModel):
     guest_account_id: str
 
+class AuthValidationRequest(BaseModel):
+    guest_account_id: str
+
 class UpdateGuestAccountProfileRequest(BaseModel):
     guest_account_id: str
     first_name: Optional[str] = None
@@ -1338,7 +1341,7 @@ def login_submit_otp(email: str, otp: str, db: Session):
     
     # Generate token
     token = gen_login_token(email)
-    expiry_on = now + timedelta(hours=24)
+    expiry_on = now + timedelta(minutes=LOGIN_EXPIRY_MINUTES)
     
     # Update or create login session
     gls = db.query(GuestLoginSession).filter(
@@ -1397,6 +1400,11 @@ def auth_validation_by_token_and_guest_account_id(guest_account_id: str, token: 
             result["expiry_on"] = int(gls.expiry_on.timestamp())
     
     return result
+
+@app.post("/auth/validate-by-token-and-guest-account-id")
+def auth_validation_endpoint(request: Request, payload: AuthValidationRequest, db: Session = Depends(get_db)):
+    guest_account_token = request.headers.get("GuestAccountToken", "")
+    return auth_validation_by_token_and_guest_account_id(payload.guest_account_id, guest_account_token, db)
 
 @app.post("/guest-account/profile")
 def get_guest_account_profile_endpoint(request: Request, payload: GuestAccountProfileRequest, db: Session = Depends(get_db)):
