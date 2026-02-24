@@ -1256,8 +1256,13 @@ def gen_login_otp():
 
 def gen_login_token(email: str):
     """Generate JWT login token"""
+    now = datetime.now(timezone.utc)
     token = jwt.encode(
-        {"email": email},
+        {
+            "email": email,
+            "iat": int(now.timestamp()),
+            "jti": str(uuid4())
+        },
         JWT_SECRET,
         algorithm="HS256"
     )
