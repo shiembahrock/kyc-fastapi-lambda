@@ -701,6 +701,7 @@ def _process_stripe_webhook_event(event: dict, db: Session) -> dict:
             expires_at = event_data.get("expires_at", "")
             
             op.checkout_session_status = status
+            op.payment_status = payment_status
             op.psp_ref_id = session_id
             op.usage_status = UsageStatus.Unuseable
             
@@ -1448,7 +1449,7 @@ def auth_validation_by_token_and_guest_account_id(guest_account_id: str, token: 
     
     return result
 
-@app.post("/auth/validate-token")
+@app.post("/auth/validate-by-token-and-guest-account-id")
 def auth_validation_endpoint(request: Request, payload: AuthValidationRequest, db: Session = Depends(get_db)):
     guest_account_token = request.headers.get("GuestAccountToken", "")
     return auth_validation_by_token_and_guest_account_id(payload.guest_account_id, guest_account_token, db)
@@ -1719,6 +1720,7 @@ def get_order_payments_by_guest_account(guest_account_id: str, guest_account_tok
             OrderPayment.order_code,
             OrderPayment.usage_status,
             OrderPayment.payment_status,
+            OrderPayment.checkout_session_status,
             OrderPayment.checkout_url,
             OrderPayment.psp_stripe_receipt_url
         ).join(
@@ -1743,6 +1745,7 @@ def get_order_payments_by_guest_account(guest_account_id: str, guest_account_tok
                 "order_code": row.order_code,
                 "usage_status": row.usage_status,
                 "payment_status": row.payment_status,
+                "checkout_session_status": row.checkout_session_status,
                 "checkout_url": row.checkout_url,
                 "psp_stripe_receipt_url": row.psp_stripe_receipt_url
             }
