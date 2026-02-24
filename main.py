@@ -693,6 +693,26 @@ def _process_stripe_webhook_event(event: dict, db: Session) -> dict:
 
             result["processed"] = True
             result["message"] = f"Payment updated for order {op.order_code}"
+        
+        elif event_type == "checkout.session.expired":
+            session_id = event_data.get("id", "")
+            payment_status = event_data.get("payment_status", "")
+            status = event_data.get("status", "")
+            expires_at = event_data.get("expires_at", "")
+            
+            op.checkout_session_status = status
+            op.psp_ref_id = session_id
+            op.usage_status = UsageStatus.Unuseable
+            
+            if expires_at:
+                try:
+                    op.transaction_expired_date = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
+                except Exception:
+                    pass
+            
+            result["processed"] = True
+            result["message"] = f"Checkout session expired for order {op.order_code}"
+        
         else:
             result["message"] = f"Event type '{event_type}' not handled"
         
@@ -1144,6 +1164,33 @@ def update_order_assessment_iscomplete_sendpdfreport(event_type: str, assessment
         if not oa.is_complete:
             oa.is_complete = True
             db.commit()
+            
+            # Check order payment and update usage_status if needed
+            op_check = db.query(
+                OrderPayment.order_payment_id,
+                OrderPayment.service_id_ordered,
+                ServicePrice.is_search_by_credit,
+                ServicePrice.search_number
+            ).join(
+                ServicePrice, OrderPayment.service_id_ordered == ServicePrice.service_price_id
+            ).filter(
+                OrderPayment.order_payment_id == oa.order_payment_id
+            ).first()
+            
+            if op_check:
+                if not op_check.is_search_by_credit:
+                    complete_count = db.query(OrderAssessment).filter(
+                        OrderAssessment.order_payment_id == op_check.order_payment_id,
+                        OrderAssessment.is_complete == True
+                    ).count()
+                    
+                    if complete_count >= op_check.search_number:
+                        op = db.query(OrderPayment).filter(
+                            OrderPayment.order_payment_id == op_check.order_payment_id
+                        ).first()
+                        if op:
+                            op.usage_status = UsageStatus.Completed
+                            db.commit()
         
         # Create search history
         try:
@@ -1401,10 +1448,85 @@ def auth_validation_by_token_and_guest_account_id(guest_account_id: str, token: 
     
     return result
 
-@app.post("/auth/validate-by-token-and-guest-account-id")
+@app.post("/auth/validate-token")
 def auth_validation_endpoint(request: Request, payload: AuthValidationRequest, db: Session = Depends(get_db)):
     guest_account_token = request.headers.get("GuestAccountToken", "")
     return auth_validation_by_token_and_guest_account_id(payload.guest_account_id, guest_account_token, db)
+
+@app.get("/service-info/{order_code}")
+def get_service_info_by_order_code_endpoint(order_code: str, request: Request, db: Session = Depends(get_db)):
+    guest_account_id = request.headers.get("GuestAccountId", "")
+    guest_login_token = request.headers.get("GuestLoginToken", "")
+    return get_service_info_by_order_code(order_code, guest_account_id, guest_login_token, db)
+
+def get_service_info_by_order_code(order_code: str, guest_account_id: str, token: str, db: Session):
+    """Get service info by order code"""
+    auth_result = auth_validation_by_token_and_guest_account_id(guest_account_id, token, db)
+    
+    if auth_result["auth_status"] == "valid":
+        # Get order payment with joins
+        result = db.query(
+            OrderPayment.order_payment_id,
+            OrderPayment.order_code,
+            OrderPayment.payment_status,
+            OrderPayment.checkout_session_status,
+            OrderPayment.usage_status,
+            ServicePrice.service_price_id,
+            ServicePrice.service_name,
+            ServicePrice.is_search_by_credit,
+            ServicePrice.search_number,
+            GuestAccount.guest_account_id,
+            GuestAccount.email
+        ).join(
+            ServicePrice, OrderPayment.service_id_ordered == ServicePrice.service_price_id
+        ).join(
+            GuestAccount, OrderPayment.guest_account_id == GuestAccount.guest_account_id
+        ).filter(
+            OrderPayment.order_code == order_code,
+            OrderPayment.guest_account_id == guest_account_id
+        ).first()
+        
+        if result:
+            # Get order assessments
+            assessments = db.query(OrderAssessment).filter(
+                OrderAssessment.order_payment_id == result.order_payment_id
+            ).all()
+            
+            assessment_list = [
+                {
+                    "order_assessment_id": str(oa.order_assessment_id),
+                    "order_payment_id": str(oa.order_payment_id),
+                    "assessment_id": str(oa.assessment_id),
+                    "is_complete": oa.is_complete,
+                    "pdf_sent": oa.pdf_sent,
+                    "reference_key": oa.reference_key
+                }
+                for oa in assessments
+            ]
+            
+            order_payment_info = {
+                "guest_account_id": str(result.guest_account_id),
+                "email": result.email,
+                "order_payment_id": str(result.order_payment_id),
+                "order_code": result.order_code,
+                "payment_status": result.payment_status,
+                "checkout_session_status": result.checkout_session_status,
+                "usage_status": result.usage_status,
+                "service_price_id": str(result.service_price_id),
+                "service_name": result.service_name,
+                "is_search_by_credit": result.is_search_by_credit,
+                "search_number": result.search_number,
+                "order_assessments": assessment_list
+            }
+            
+            return JSONResponse(status_code=200, content={
+                "order_code_info": order_payment_info,
+                "assessment_count": len(assessments)
+            })
+        else:
+            return JSONResponse(status_code=204, content={"message": "Order Code is not founded."})
+    else:
+        return JSONResponse(status_code=401, content={"message": "unauthorized"})
 
 @app.post("/guest-account/profile")
 def get_guest_account_profile_endpoint(request: Request, payload: GuestAccountProfileRequest, db: Session = Depends(get_db)):
