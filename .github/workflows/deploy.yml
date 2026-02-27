@@ -2,7 +2,7 @@ name: Deploy Lambda Function
 
 on:
   push:
-    branches: [ main ]  # Deploy when pushing to main branch
+    branches: [ main ]
   pull_request:
     branches: [ main ]
 
@@ -14,14 +14,30 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v3
     
-    - name: Set up Python  # Change this based on your runtime
+    - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
     
-    - name: Install dependencies
+    - name: List files (for debugging)
       run: |
-        pip install -r requirements.txt
+        echo "Repository contents:"
+        ls -la
+    
+    - name: Install dependencies and create package
+      run: |
+        # Install dependencies to current directory
+        pip install -r requirements.txt -t .
+        
+        # Create zip file excluding unnecessary files
+        zip -r deployment-package.zip . -x \
+          "*.git*" \
+          ".github/*" \
+          "*.zip" \
+          "__pycache__/*" \
+          "*.pyc" \
+          "*.md" \
+          ".gitignore"
     
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v2
@@ -29,13 +45,6 @@ jobs:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ secrets.AWS_REGION }}
-    
-    - name: Create deployment package
-      run: |
-        mkdir package
-        pip install -r requirements.txt -t package/
-        cp -r src/* package/
-        cd package && zip -r ../deployment-KYCFastAPIFunction-package.zip .
     
     - name: Deploy to Lambda
       run: |
