@@ -30,7 +30,7 @@ jobs:
         pip install -r requirements.txt -t .
         
         # Create zip file excluding unnecessary files
-        zip -r deployment-package.zip . -x \
+        zip -r deployment-KYCFastAPIFunction-package.zip . -x \
           "*.git*" \
           ".github/*" \
           "*.zip" \
