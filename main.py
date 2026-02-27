@@ -2022,6 +2022,6 @@ def create_search_history(assessment_id: str, db: Session):
         logger.exception("Error creating search history")
         db.rollback()
         return {"error": str(e)}
-# Test auto deployment #1
+# Test auto deployment #2
 if Mangum:
     handler = Mangum(app, lifespan="off")
