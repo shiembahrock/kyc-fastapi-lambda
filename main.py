@@ -27,7 +27,7 @@ from enums import UsageStatus
 
 JWT_SECRET = os.getenv("JWT_SECRET", "")
 WEBHOOK_TARGET_LAMBDA_ARN = os.getenv("WEBHOOK_TARGET_LAMBDA_ARN", "KYCFastAPIFunctionExternal")
-LOGIN_EXPIRY_MINUTES = int(os.getenv("LOGIN_EXPIRY_MINUTES", "60"))
+LOGIN_EXPIRY_MINUTES = int(os.getenv("LOGIN_EXPIRY_MINUTES", "1440"))
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -157,6 +157,10 @@ class GetSearchHistoriesByGuestAccountRequest(BaseModel):
     is_desc: bool = True
     page_size: int = 10
     page_number: int = 1
+
+class SubmitMuinmosAnswerRequest(BaseModel):
+    assessment_id: str
+    answer: list
 
 @app.get("/")
 def read_root():
@@ -746,6 +750,22 @@ def create_assessment_endpoint(user_email: str, order_code: str, db: Session = D
 def muinmos_assessment_check_endpoint(db: Session = Depends(get_db)):
     return muinmos_assessment_check(db)
 
+@app.get("/muinmos/question/{assessment_id}")
+def get_muinmos_question_endpoint(assessment_id: str, db: Session = Depends(get_db)):
+    return get_muinmos_question(assessment_id, db)
+
+@app.post("/muinmos/submit-answer")
+def submit_muinmos_answer_endpoint(request: Request, payload: SubmitMuinmosAnswerRequest, db: Session = Depends(get_db)):
+    guest_account_id = request.headers.get("GuestAccountId", "")
+    guest_login_token = request.headers.get("GuestLoginToken", "")
+    return submit_muinmos_answer(
+        guest_account_id,
+        guest_login_token,
+        payload.assessment_id,
+        payload.answer,
+        db
+    )
+
 def get_muinmos_token(db: Session = Depends(get_db)):
     """Get Muinmos token, fetch new one if expired or doesn't exist"""
     token = db.query(MuinmosToken).first()
@@ -1250,6 +1270,79 @@ def update_order_assessment_iscomplete_sendpdfreport(event_type: str, assessment
     
     return {"status": "skipped", "reason": "event_type is not 0"}
 
+def get_muinmos_question(assessment_id: str, db: Session):
+    """Get Muinmos question for assessment"""
+    settings = db.query(MuinmosSetting).filter(MuinmosSetting.is_used == True).first()
+    if not settings:
+        return {"error": "No active Muinmos settings found"}
+    
+    payload = {
+        "action": "get_muinmos_question",
+        "payload": {
+            "base_api_url": settings.base_api_url,
+            "assessment_id": assessment_id
+        }
+    }
+    
+    if not WEBHOOK_TARGET_LAMBDA_ARN:
+        logger.warning("get_muinmos_question: WEBHOOK_TARGET_LAMBDA_ARN not set")
+        return {"error": "External service not configured"}
+    
+    try:
+        response = lambda_client.invoke(
+            FunctionName=WEBHOOK_TARGET_LAMBDA_ARN,
+            InvocationType="RequestResponse",
+            Payload=_json.dumps(payload).encode("utf-8")
+        )
+        response_payload = _json.loads(response["Payload"].read().decode("utf-8"))
+        return response_payload
+    except Exception as e:
+        logger.exception("Error : " + str(e))
+        return {"error": "Failed to get Muinmos question, please contact the administrator."}
+
+def submit_muinmos_answer(guest_account_id: str, guest_account_token: str, assessment_id: str, answer: list, db: Session):
+    """Submit Muinmos answer"""
+    auth_result = auth_validation_by_token_and_guest_account_id(guest_account_id, guest_account_token, db)
+    
+    if auth_result["auth_status"] != "valid":
+        return JSONResponse(status_code=401, content={"message": "unauthorized"})
+    
+    settings = db.query(MuinmosSetting).filter(MuinmosSetting.is_used == True).first()
+    if not settings:
+        return {"error": "No active Muinmos settings found"}
+    
+    token_response = get_muinmos_token(db)
+    if "error" in token_response:
+        return token_response
+    
+    payload = {
+        "action": "submit_muinmos_answer",
+        "payload": {
+            "base_api_url": settings.base_api_url,
+            "token_type": token_response["token_type"],
+            "access_token": token_response["access_token"],
+            "assessment_id": assessment_id,
+            "answer": answer
+        }
+    }
+    
+    if not WEBHOOK_TARGET_LAMBDA_ARN:
+        logger.warning("submit_muinmos_answer: WEBHOOK_TARGET_LAMBDA_ARN not set")
+        return {"error": "External service not configured"}
+    
+    try:
+        response = lambda_client.invoke(
+            FunctionName=WEBHOOK_TARGET_LAMBDA_ARN,
+            InvocationType="RequestResponse",
+            Payload=_json.dumps(payload).encode("utf-8")
+        )
+        response_payload = _json.loads(response["Payload"].read().decode("utf-8"))
+        response_payload["token_expiry_on"] = auth_result["expiry_on"]
+        return response_payload
+    except Exception as e:
+        logger.exception("Error : " + str(e))
+        return {"error": "Failed to submit answer, please contact the administrator."}
+
 def gen_login_otp():
     """Generate 4-digit OTP"""
     return str(random.randint(1000, 9999))
@@ -1527,7 +1620,8 @@ def get_service_info_by_order_code(order_code: str, guest_account_id: str, token
             
             return JSONResponse(status_code=200, content={
                 "order_code_info": order_payment_info,
-                "assessment_count": len(assessments)
+                "assessment_count": len(assessments),
+                "token_expiry_on": auth_result["expiry_on"],
             })
         else:
             return JSONResponse(status_code=204, content={"message": "Order Code is not founded."})
