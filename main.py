@@ -162,6 +162,9 @@ class SubmitMuinmosAnswerRequest(BaseModel):
     assessment_id: str
     answer: list
 
+class CreateMuinmosAssessmentByGuestAccountRequest(BaseModel):
+    order_code: str
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to KYC Backend API"}
@@ -766,6 +769,17 @@ def submit_muinmos_answer_endpoint(request: Request, payload: SubmitMuinmosAnswe
         db
     )
 
+@app.post("/muinmos/create-assessment-by-guest-account")
+def create_muinmos_assessment_by_guest_account_endpoint(request: Request, payload: CreateMuinmosAssessmentByGuestAccountRequest, db: Session = Depends(get_db)):
+    guest_account_id = request.headers.get("GuestAccountId", "")
+    guest_login_token = request.headers.get("GuestLoginToken", "")
+    return create_muinmos_assessment_by_guest_account(
+        guest_account_id,
+        guest_login_token,
+        payload.order_code,
+        db
+    )
+
 def get_muinmos_token(db: Session = Depends(get_db)):
     """Get Muinmos token, fetch new one if expired or doesn't exist"""
     token = db.query(MuinmosToken).first()
@@ -1299,6 +1313,22 @@ def get_muinmos_question(assessment_id: str, db: Session):
     except Exception as e:
         logger.exception("Error : " + str(e))
         return {"error": "Failed to get Muinmos question, please contact the administrator."}
+
+def create_muinmos_assessment_by_guest_account(guest_account_id: str, guest_account_token: str, order_code: str, db: Session):
+    """Create Muinmos assessment by guest account"""
+    auth_result = auth_validation_by_token_and_guest_account_id(guest_account_id, guest_account_token, db)
+    
+    if auth_result["auth_status"] == "valid":
+        ga = db.query(GuestAccount).filter(GuestAccount.guest_account_id == guest_account_id).first()
+        if not ga:
+            return JSONResponse(status_code=401, content={"message": "unauthorized"})
+        
+        result = create_assessment(ga.email, order_code, db)
+        if isinstance(result, dict) and "error" not in result:
+            result["token_expiry_on"] = auth_result["expiry_on"]
+        return result
+    else:
+        return JSONResponse(status_code=401, content={"message": "unauthorized"})
 
 def submit_muinmos_answer(guest_account_id: str, guest_account_token: str, assessment_id: str, answer: list, db: Session):
     """Submit Muinmos answer"""
