@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from db import SessionLocal
 from schemas.order_schemas import CheckoutStartRequest
-from services.checkout_service import checkout_start
+from services.stripe_service import checkout_start
 
 router = APIRouter(prefix="/checkout", tags=["checkout"])
 
