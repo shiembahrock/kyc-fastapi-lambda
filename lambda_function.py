@@ -1,5 +1,12 @@
 from mangum import Mangum
-from main import app, _process_stripe_webhook_event, muinmos_assessment_check, check_muinmos_assessment_to_send_kycpdf, update_order_assessment_iscomplete_sendpdfreport, SessionLocal
+from main import app
+from db import SessionLocal
+from services.stripe_service import process_stripe_webhook_event
+from services.muinmos_service import (
+    muinmos_assessment_check,
+    check_muinmos_assessment_to_send_kycpdf,
+    update_order_assessment_iscomplete_sendpdfreport
+)
 
 def lambda_handler(event, context):
     """Direct Lambda handler for non-HTTP invocations"""
@@ -7,7 +14,7 @@ def lambda_handler(event, context):
         db = SessionLocal()
         try:
             webhook_event = event.get("webhook_event", {})
-            result = _process_stripe_webhook_event(webhook_event, db)
+            result = process_stripe_webhook_event(webhook_event, db)
             return result
         finally:
             db.close()
