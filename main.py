@@ -6,7 +6,7 @@ from utils.helpers import load_env_files
 import os
 
 # Import all routers
-from routers import auth, muinmos, guest_account, orders, stripe, services
+from routers import auth, muinmos, guest_account, orders, stripe, services, admin
 
 app = FastAPI(title="KYC Backend")
 
@@ -33,6 +33,7 @@ app.include_router(guest_account.router)
 app.include_router(orders.router)
 app.include_router(stripe.router)
 app.include_router(services.router)
+app.include_router(admin.router)
 
 # Basic endpoints
 @app.get("/")
