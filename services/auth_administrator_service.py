@@ -3,7 +3,7 @@ import json
 import random
 import string
 import logging
-import bcrypt
+from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 from models import AdminUser
 from utils.lambda_client import lambda_client
@@ -11,8 +11,10 @@ from utils.lambda_client import lambda_client
 WEBHOOK_TARGET_LAMBDA_ARN = os.getenv("WEBHOOK_TARGET_LAMBDA_ARN", "")
 logger = logging.getLogger()
 
+_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    return _pwd_context.hash(password)
 
 def create_administrator(email: str, db: Session):
     existing = db.query(AdminUser).filter(AdminUser.email == email).first()
@@ -62,7 +64,7 @@ def login_administrator(email: str, password: str, db: Session):
     admin = db.query(AdminUser).filter(AdminUser.email == email).first()
     if not admin or not admin.password:
         return {"success": False, "message": "Invalid email or password."}
-    if not bcrypt.checkpw(password.encode("utf-8"), admin.password.encode("utf-8")):
+    if not _pwd_context.verify(password, admin.password):
         return {"success": False, "message": "Invalid email or password."}
     if not admin.is_activated:
         return {"success": False, "message": "Account is not activated."}
