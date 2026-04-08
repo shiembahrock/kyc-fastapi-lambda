@@ -137,6 +137,7 @@ def create_assessment(user_email: str, order_code: str, db: Session):
         "action": "create_assessment",
         "payload": {
             "user_email": user_email,
+            "kyc_profile_id": sp.kyc_profile_id,
             "order_code": reference_key,
             "api_url": settings.base_api_url + "/api/assessment?api-version=2.0",
             "token_type": token_response["token_type"],
