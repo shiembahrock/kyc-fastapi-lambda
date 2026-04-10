@@ -18,6 +18,7 @@ class CheckoutStartRequest(BaseModel):
     last_name: str
     company_name: str
     country_id: str
+    phone: str
     service_id: str
     price: float
     currency_id: str

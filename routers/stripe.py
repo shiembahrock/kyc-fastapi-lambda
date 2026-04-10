@@ -21,6 +21,7 @@ def checkout_start_endpoint(payload: CheckoutStartRequest, db: Session = Depends
         payload.last_name,
         payload.company_name,
         payload.country_id,
+        payload.phone,
         payload.service_id,
         payload.price,
         payload.currency_id,
