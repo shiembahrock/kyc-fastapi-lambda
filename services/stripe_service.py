@@ -154,7 +154,7 @@ def process_stripe_webhook_event(event: dict, db: Session) -> dict:
     
     return result
 
-def checkout_start(email: str, first_name: str, last_name: str, company_name: str, country_id: str, service_id: str, price: float, currency_id: str, currency_code: str, cancel_url: str, success_url: str, db: Session):
+def checkout_start(email: str, first_name: str, last_name: str, company_name: str, country_id: str, phone: str, service_id: str, price: float, currency_id: str, currency_code: str, cancel_url: str, success_url: str, db: Session):
     """Start checkout process"""
     g = db.query(GuestAccount).filter(GuestAccount.email == email).first()
     if not g:
@@ -164,12 +164,25 @@ def checkout_start(email: str, first_name: str, last_name: str, company_name: st
             last_name=last_name,
             company_name=company_name,
             country_id=country_id,
+            phone=phone,
         )
         db.add(g)
         db.flush()
         
         gans = GuestAccountNotificationSetting(guest_account_id=g.guest_account_id)
         db.add(gans)
+    else:
+        # Update empty/null values with parameters
+        if not g.first_name and first_name:
+            g.first_name = first_name
+        if not g.last_name and last_name:
+            g.last_name = last_name
+        if not g.company_name and company_name:
+            g.company_name = company_name
+        if not g.country_id and country_id:
+            g.country_id = country_id
+        if not g.phone and phone:
+            g.phone = phone
     
     order_code = gen_order_code()
     op = OrderPayment(
@@ -179,6 +192,7 @@ def checkout_start(email: str, first_name: str, last_name: str, company_name: st
         last_name=last_name,
         company_name=company_name,
         country_id=country_id,
+        phone=phone,
         currency_id=currency_id,
         payment_amount=Decimal(str(price)),
         order_code=order_code,
