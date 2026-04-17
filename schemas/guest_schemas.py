@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 class GuestAccountProfileRequest(BaseModel):
     guest_account_id: str
@@ -43,6 +43,11 @@ class GetReferralCodeRequest(BaseModel):
 class ApplyReferralCodeRequest(BaseModel):
     guest_account_id: str
     referral_code: str
+
+class InviteFriendsRequest(BaseModel):
+    guest_account_id: str
+    emails: List[str]
+    redirected_link: str
 
 class GetReferredUsersRequest(BaseModel):
     guest_account_id: str

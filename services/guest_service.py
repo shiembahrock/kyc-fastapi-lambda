@@ -3,6 +3,8 @@ import re
 import random
 import string
 import uuid
+import json as _json
+import os
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fastapi.responses import JSONResponse
@@ -12,6 +14,9 @@ from models import (
     ServicePrice, SearchHistory, OrderAssessment, GuestAccountReferral
 )
 from services.auth_service import auth_validation_by_token_and_guest_account_id
+from utils.lambda_client import lambda_client
+
+WEBHOOK_TARGET_LAMBDA_ARN = os.getenv("WEBHOOK_TARGET_LAMBDA_ARN", "KYCFastAPIFunctionExternal")
 
 logger = logging.getLogger()
 
@@ -670,6 +675,88 @@ def apply_referral_code_by_auth_guest_account(guest_account_id: str, guest_accou
     except Exception as e:
         db.rollback()
         logger.exception("Error applying referral code")
+        if "timeout" in str(e).lower():
+            return JSONResponse(status_code=408, content={"message": "timeout", "token_expiry_on": auth_result["expiry_on"]})
+        else:
+            return JSONResponse(status_code=500, content={"message": "failed", "token_expiry_on": auth_result["expiry_on"]})
+
+def invite_friends_with_referral_code(guest_account_id: str, guest_account_token: str, emails: list, redirected_link: str, db: Session):
+    """Send invitation emails with referral code to a list of email addresses"""
+    auth_result = auth_validation_by_token_and_guest_account_id(guest_account_id, guest_account_token, db)
+
+    if auth_result["auth_status"] != "valid":
+        return JSONResponse(status_code=401, content={"message": "unauthorized"})
+
+    try:
+        referral = db.query(GuestAccountReferral).join(
+            GuestAccount, GuestAccountReferral.guest_account_id == GuestAccount.guest_account_id
+        ).filter(
+            GuestAccountReferral.guest_account_id == guest_account_id,
+            GuestAccountReferral.referral_code.isnot(None)
+        ).add_columns(
+            GuestAccount.email,
+            GuestAccount.first_name,
+            GuestAccount.last_name
+        ).first()
+
+        if not referral or not referral.GuestAccountReferral.referral_code:
+            return JSONResponse(status_code=404, content={
+                "message": "No referral code found. Please generate a referral code first.",
+                "token_expiry_on": auth_result["expiry_on"]
+            })
+
+        referral_code = referral.GuestAccountReferral.referral_code
+        sender_email = referral.email or ""
+        sender_name = f"{referral.first_name or ''} {referral.last_name or ''}".strip()
+        invite_link = f"{redirected_link}?ref={referral_code}"
+
+        body = f"""
+<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #2c3e50;">
+    <h2 style="color: #2c3e50;">You've Been Invited by {sender_email} to Enigmatig KYC &amp; AML</h2>
+    <p>Hi,</p>
+    <p>You have been personally invited to join <strong>Enigmatig KYC &amp; AML</strong> &mdash; a powerful platform for KYC and AML compliance checks.</p>
+    <p>Use the referral code below when signing up:</p>
+    <div style="background-color: #f4f4f4; border-radius: 6px; padding: 12px 20px; display: inline-block; margin: 10px 0;">
+        <span style="font-size: 22px; font-weight: bold; letter-spacing: 2px; color: #2c3e50;">{referral_code}</span>
+    </div>
+    <p>Or simply click the button below to get started with your referral code already applied:</p>
+    <div style="text-align: center; margin: 30px 0;">
+        <a href="{invite_link}" style="background-color: #2c3e50; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-size: 16px; font-weight: bold;">Accept Invitation</a>
+    </div>
+    <p style="color: #7f8c8d; font-size: 13px;">If the button doesn't work, copy and paste this link into your browser:<br/><a href="{invite_link}">{invite_link}</a></p>
+    <hr style="border: none; border-top: 1px solid #ecf0f1; margin: 30px 0;"/>
+    <p>Best Regards,<br/><br/>{sender_name}</p>
+    <p style="color: #bdc3c7; font-size: 12px;">This invitation was sent via Enigmatig KYC &amp; AML platform.</p>
+</div>
+"""
+
+        if not WEBHOOK_TARGET_LAMBDA_ARN:
+            logger.warning("invite_friends_with_referral_code: WEBHOOK_TARGET_LAMBDA_ARN not set; skipping invitation email")
+            return JSONResponse(status_code=500, content={"message": "Email service is not configured.", "token_expiry_on": auth_result["expiry_on"]})
+
+        payload = {
+            "action": "send_email_smtp",
+            "payload": {
+                "to_email": ", ".join(emails),
+                "subject": "Enigmatig KYC & AML Invitation",
+                "body": body,
+                "is_html": True
+            }
+        }
+
+        lambda_client.invoke(
+            FunctionName=WEBHOOK_TARGET_LAMBDA_ARN,
+            InvocationType="RequestResponse",
+            Payload=_json.dumps(payload).encode("utf-8")
+        )
+
+        return JSONResponse(status_code=200, content={
+            "message": "success",
+            "token_expiry_on": auth_result["expiry_on"]
+        })
+
+    except Exception as e:
+        logger.exception("Error sending invitation emails")
         if "timeout" in str(e).lower():
             return JSONResponse(status_code=408, content={"message": "timeout", "token_expiry_on": auth_result["expiry_on"]})
         else:

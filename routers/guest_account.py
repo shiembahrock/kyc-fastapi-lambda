@@ -10,6 +10,7 @@ from schemas.guest_schemas import (
     CreateReferralCodeRequest,
     GetReferralCodeRequest,
     ApplyReferralCodeRequest,
+    InviteFriendsRequest,
     GetReferredUsersRequest
 )
 from services.guest_service import (
@@ -21,6 +22,7 @@ from services.guest_service import (
     create_referral_code,
     get_referral_code,
     apply_referral_code_by_auth_guest_account,
+    invite_friends_with_referral_code,
     get_referred_users
 )
 
@@ -109,6 +111,17 @@ def apply_referral_code_endpoint(request: Request, payload: ApplyReferralCodeReq
         payload.guest_account_id,
         guest_account_token,
         payload.referral_code,
+        db
+    )
+
+@router.post("/invite-friends")
+def invite_friends_endpoint(request: Request, payload: InviteFriendsRequest, db: Session = Depends(get_db)):
+    guest_account_token = request.headers.get("GuestAccountToken", "")
+    return invite_friends_with_referral_code(
+        payload.guest_account_id,
+        guest_account_token,
+        payload.emails,
+        payload.redirected_link,
         db
     )
 
