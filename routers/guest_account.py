@@ -6,14 +6,22 @@ from schemas.guest_schemas import (
     UpdateGuestAccountProfileRequest,
     UpdateGuestAccountNotificationSettingsRequest,
     GetOrderPaymentsByGuestAccountRequest,
-    GetSearchHistoriesByGuestAccountRequest
+    GetSearchHistoriesByGuestAccountRequest,
+    CreateReferralCodeRequest,
+    GetReferralCodeRequest,
+    ApplyReferralCodeRequest,
+    GetReferredUsersRequest
 )
 from services.guest_service import (
     get_guest_account_profile,
     update_guest_account_profile,
     update_guest_account_notification_settings,
     get_order_payments_by_guest_account,
-    get_search_histories_by_guest_account_id
+    get_search_histories_by_guest_account_id,
+    create_referral_code,
+    get_referral_code,
+    apply_referral_code_by_auth_guest_account,
+    get_referred_users
 )
 
 router = APIRouter(prefix="/guest-account", tags=["guest_account"])
@@ -75,6 +83,39 @@ def get_order_payments_by_guest_account_endpoint(request: Request, payload: GetO
 def get_search_histories_by_guest_account_id_endpoint(request: Request, payload: GetSearchHistoriesByGuestAccountRequest, db: Session = Depends(get_db)):
     guest_account_token = request.headers.get("GuestAccountToken", "")
     return get_search_histories_by_guest_account_id(
+        payload.guest_account_id,
+        guest_account_token,
+        payload.sort_by,
+        payload.is_desc,
+        payload.page_size,
+        payload.page_number,
+        db
+    )
+
+@router.post("/request-referral-code")
+def request_referral_code_endpoint(request: Request, payload: CreateReferralCodeRequest, db: Session = Depends(get_db)):
+    guest_account_token = request.headers.get("GuestAccountToken", "")
+    return create_referral_code(payload.guest_account_id, guest_account_token, db)
+
+@router.post("/get-referral-code")
+def get_referral_code_endpoint(request: Request, payload: GetReferralCodeRequest, db: Session = Depends(get_db)):
+    guest_account_token = request.headers.get("GuestAccountToken", "")
+    return get_referral_code(payload.guest_account_id, guest_account_token, db)
+
+@router.post("/apply-referral-code")
+def apply_referral_code_endpoint(request: Request, payload: ApplyReferralCodeRequest, db: Session = Depends(get_db)):
+    guest_account_token = request.headers.get("GuestAccountToken", "")
+    return apply_referral_code_by_auth_guest_account(
+        payload.guest_account_id,
+        guest_account_token,
+        payload.referral_code,
+        db
+    )
+
+@router.post("/referred-users")
+def get_referred_users_endpoint(request: Request, payload: GetReferredUsersRequest, db: Session = Depends(get_db)):
+    guest_account_token = request.headers.get("GuestAccountToken", "")
+    return get_referred_users(
         payload.guest_account_id,
         guest_account_token,
         payload.sort_by,

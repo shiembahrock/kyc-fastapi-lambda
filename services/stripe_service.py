@@ -6,7 +6,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 import json as _json
 
-from models import OrderPayment, GuestAccount, StripeSetting, ServicePrice, Currency, Country, GuestAccountNotificationSetting
+from models import OrderPayment, GuestAccount, StripeSetting, ServicePrice, Currency, Country, GuestAccountNotificationSetting, GuestAccountReferral
 from enums import UsageStatus
 from utils.lambda_client import lambda_client
 from utils.helpers import gen_order_code

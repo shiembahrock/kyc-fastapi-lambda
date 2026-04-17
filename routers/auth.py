@@ -1,11 +1,18 @@
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from db import SessionLocal
-from schemas.auth_schemas import LoginOTPRequest, SubmitOTPRequest, AuthValidationRequest
+from schemas.auth_schemas import (
+    LoginOTPRequest,
+    SubmitOTPRequest,
+    AuthValidationRequest,
+    RegisterAccountRequest,
+)
 from services.auth_service import (
     login_with_email_generate_otp,
+    login_with_registered_email_generate_otp,
     login_submit_otp,
-    auth_validation_by_token_and_guest_account_id
+    auth_validation_by_token_and_guest_account_id,
+    register_account,
 )
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -20,6 +27,23 @@ def get_db():
 @router.post("/email-get-otp")
 def login_with_email_generate_otp_endpoint(payload: LoginOTPRequest, db: Session = Depends(get_db)):
     return login_with_email_generate_otp(payload.email, payload.is_from_login, db)
+
+@router.post("/registered-email-get-otp")
+def login_with_registered_email_generate_otp_endpoint(payload: LoginOTPRequest, db: Session = Depends(get_db)):
+    return login_with_registered_email_generate_otp(payload.email, payload.is_from_login, db)
+
+@router.post("/register-account")
+def register_account_endpoint(payload: RegisterAccountRequest, db: Session = Depends(get_db)):
+    return register_account(
+        payload.email,
+        payload.first_name,
+        payload.last_name,
+        payload.company_name,
+        payload.country_id,
+        payload.phone,
+        payload.referral_code,
+        db
+    )
 
 @router.post("/submit-otp")
 def login_submit_otp_endpoint(payload: SubmitOTPRequest, db: Session = Depends(get_db)):

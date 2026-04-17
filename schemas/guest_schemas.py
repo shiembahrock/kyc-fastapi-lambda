@@ -33,3 +33,20 @@ class GetSearchHistoriesByGuestAccountRequest(BaseModel):
     is_desc: bool = True
     page_size: int = 10
     page_number: int = 1
+
+class CreateReferralCodeRequest(BaseModel):
+    guest_account_id: str
+
+class GetReferralCodeRequest(BaseModel):
+    guest_account_id: str
+
+class ApplyReferralCodeRequest(BaseModel):
+    guest_account_id: str
+    referral_code: str
+
+class GetReferredUsersRequest(BaseModel):
+    guest_account_id: str
+    sort_by: str = "created_at"
+    is_desc: bool = True
+    page_size: int = 10
+    page_number: int = 1

@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic import BaseModel, EmailStr
 
 class LoginOTPRequest(BaseModel):
@@ -10,3 +11,12 @@ class SubmitOTPRequest(BaseModel):
 
 class AuthValidationRequest(BaseModel):
     guest_account_id: str
+
+class RegisterAccountRequest(BaseModel):
+    email: EmailStr
+    first_name: str
+    last_name: str
+    company_name: str
+    country_id: str
+    phone: str
+    referral_code: Optional[str] = None

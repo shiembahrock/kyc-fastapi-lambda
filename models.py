@@ -172,6 +172,14 @@ class GuestAccountNotificationSetting(Base):
     phone_promotion_subscription = Column(Boolean, nullable=False, default=False)
     sms_system_messages = Column(Boolean, nullable=False, default=False)
 
+class GuestAccountReferral(Base):
+    __tablename__ = "guest_account_referrals"
+    guest_account_referral_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    guest_account_id = Column(UUID(as_uuid=True), ForeignKey("guest_accounts.guest_account_id"), nullable=False)
+    referral_code = Column(String(12), unique=True, nullable=True)
+    referred_by_id = Column(UUID(as_uuid=True), ForeignKey("guest_account_referrals.guest_account_referral_id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
 class AdminUser(Base):
     __tablename__ = "admin_users"
     admin_user_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

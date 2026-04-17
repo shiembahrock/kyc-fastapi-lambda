@@ -7,7 +7,13 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 from fastapi.responses import JSONResponse
 
-from models import GuestAccount, GuestAccountOTP, GuestLoginSession, GuestAccountNotificationSetting
+from models import (
+    GuestAccount,
+    GuestAccountOTP,
+    GuestLoginSession,
+    GuestAccountNotificationSetting,
+    GuestAccountReferral,
+)
 from utils.lambda_client import lambda_client
 import json as _json
 
@@ -109,6 +115,143 @@ def login_with_email_generate_otp(email: str, is_from_login: bool, db: Session):
             logger.warning("login_with_email_generate_otp: WEBHOOK_TARGET_LAMBDA_ARN not set; skipping OTP email")
     
     return {"guest_account_id": str(ga.guest_account_id)}
+
+def login_with_registered_email_generate_otp(email: str, is_from_login: bool, db: Session):
+    """Generate and send OTP for registered email login only"""
+    # Check if email is registered in GuestAccount
+    ga = db.query(GuestAccount).filter(GuestAccount.email == email).first()
+    
+    if not ga:
+        return JSONResponse(
+            status_code=404,
+            content={"message": "email unregistered"}
+        )
+    
+    is_send_email = False
+    otp = gen_login_otp()
+    
+    gaotp = db.query(GuestAccountOTP).filter(
+        GuestAccountOTP.guest_account_id == ga.guest_account_id
+    ).first()
+    
+    if gaotp:
+        now = datetime.now(timezone.utc)
+        if gaotp.expiry_date <= now or is_from_login:
+            gaotp.requested_date = datetime.now(timezone.utc)
+            gaotp.otp = otp
+            gaotp.expiry_date = datetime.now(timezone.utc) + timedelta(minutes=5)
+            db.commit()
+            is_send_email = True
+    else:
+        now = datetime.now(timezone.utc)
+        gaotp = GuestAccountOTP(
+            guest_account_id=ga.guest_account_id,
+            requested_date=now,
+            otp=otp,
+            expiry_date=now + timedelta(minutes=5)
+        )
+        db.add(gaotp)
+        db.commit()
+        is_send_email = True
+    
+    if is_send_email:
+        if WEBHOOK_TARGET_LAMBDA_ARN:
+            payload = {
+                "action": "send_email_smtp",
+                "payload": {
+                    "to_email": ga.email,
+                    "subject": f"Enigmatig KYC & AML - {otp} is your personal code.",
+                    "body": f"Hi,<br/><br/>Your personal unique code is: {otp}.<br/>Please type your code into the login box to connect to your account.",
+                    "is_html": True
+                }
+            }
+            
+            try:
+                lambda_client.invoke(
+                    FunctionName=WEBHOOK_TARGET_LAMBDA_ARN,
+                    InvocationType="RequestResponse",
+                    Payload=_json.dumps(payload).encode("utf-8")
+                )
+            except Exception as e:
+                logger.exception("Error sending OTP email")
+        else:
+            logger.warning("login_with_registered_email_generate_otp: WEBHOOK_TARGET_LAMBDA_ARN not set; skipping OTP email")
+    
+    return {"guest_account_id": str(ga.guest_account_id)}
+
+def register_account(
+    email: str,
+    first_name: str,
+    last_name: str,
+    company_name: str,
+    country_id: str,
+    phone: str,
+    referral_code: str | None,
+    db: Session
+):
+    """Register guest account and optionally link it to an existing referral code."""
+    try:
+        existing_guest = db.query(GuestAccount).filter(GuestAccount.email == email).first()
+        if existing_guest:
+            return JSONResponse(
+                status_code=409,
+                content={"message": "Email is already registered."}
+            )
+
+        referred_by = None
+        normalized_referral_code = referral_code.strip() if referral_code else None
+
+        if normalized_referral_code:
+            referred_by = db.query(GuestAccountReferral).filter(
+                GuestAccountReferral.referral_code == normalized_referral_code
+            ).first()
+
+            if not referred_by:
+                return JSONResponse(
+                    status_code=404,
+                    content={"message": "Referral code is not found."}
+                )
+
+        guest_account = GuestAccount(
+            email=email,
+            first_name=first_name,
+            last_name=last_name,
+            company_name=company_name,
+            country_id=country_id,
+            phone=phone,
+        )
+        db.add(guest_account)
+        db.flush()
+
+        notification_setting = GuestAccountNotificationSetting(
+            guest_account_id=guest_account.guest_account_id
+        )
+        db.add(notification_setting)
+
+        if referred_by:
+            guest_referral = GuestAccountReferral(
+                guest_account_id=guest_account.guest_account_id,
+                referral_code=None,
+                referred_by_id=referred_by.guest_account_referral_id,
+            )
+            db.add(guest_referral)
+
+        db.commit()
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "message": "success",
+                "guest_account_id": str(guest_account.guest_account_id)
+            }
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Error registering guest account")
+        return JSONResponse(
+            status_code=500,
+            content={"message": "failed"}
+        )
 
 def login_submit_otp(email: str, otp: str, db: Session):
     """Submit OTP and generate login token"""

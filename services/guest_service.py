@@ -1,10 +1,15 @@
 import logging
+import re
+import random
+import string
+import uuid
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from fastapi.responses import JSONResponse
 
 from models import (
     GuestAccount, GuestAccountNotificationSetting, OrderPayment, 
-    ServicePrice, SearchHistory, OrderAssessment
+    ServicePrice, SearchHistory, OrderAssessment, GuestAccountReferral
 )
 from services.auth_service import auth_validation_by_token_and_guest_account_id
 
@@ -330,3 +335,459 @@ def get_service_info_by_order_code(order_code: str, guest_account_id: str, token
             return JSONResponse(status_code=204, content={"message": "Order Code is not founded."})
     else:
         return JSONResponse(status_code=401, content={"message": "unauthorized"})
+
+# Referral Code Functions
+
+def clean_prefix(email: str) -> str:
+    """
+    Extract and clean prefix from email for referral code generation.
+    
+    Rules:
+    - Take substring before '@'
+    - Remove '.', '-', '_'
+    - Take maximum 5 characters
+    - If less than 5 characters, keep as-is (do NOT pad)
+    
+    Args:
+        email: User's email address
+        
+    Returns:
+        Cleaned prefix string (max 5 chars)
+        
+    Examples:
+        ss@mail.com → ss
+        afs@mail.com → afs
+        qwe.sdfg@mail.co.id → qwesd
+        adinda.fitria123@gmail.com → adind
+    """
+    if not email or '@' not in email:
+        raise ValueError("Invalid email format")
+    
+    # Extract part before '@'
+    prefix = email.split('@')[0]
+    
+    # Remove special characters
+    prefix = re.sub(r'[.\-_]', '', prefix)
+    
+    # Take maximum 5 characters
+    prefix = prefix[:5]
+    
+    # Convert to lowercase for consistency
+    prefix = prefix.lower()
+    
+    if not prefix:
+        raise ValueError("Email prefix cannot be empty after cleaning")
+    
+    return prefix
+
+def generate_code(prefix: str) -> str:
+    """
+    Generate referral code with given prefix.
+    
+    Format: <prefix><2 digit number><4 alphanumeric characters>
+    
+    Args:
+        prefix: Cleaned email prefix (max 5 chars)
+        
+    Returns:
+        Complete referral code
+        
+    Examples:
+        ss → ss23a45g
+        afs → afs02bf43
+        qwesd → qwesd12100b
+    """
+    # Generate 2-digit number (00-99)
+    two_digit = f"{random.randint(0, 99):02d}"
+    
+    # Generate 4 alphanumeric characters (lowercase letters + digits)
+    chars = string.ascii_lowercase + string.digits
+    four_chars = ''.join(random.choice(chars) for _ in range(4))
+    
+    # Combine all parts
+    referral_code = f"{prefix}{two_digit}{four_chars}"
+    
+    return referral_code
+
+def create_referral_code(guest_account_id: str, guest_account_token: str, db: Session) -> dict:
+    """
+    Generate unique referral code and insert into database.
+    
+    This function:
+    1. Validates authentication token
+    2. Gets email from GuestAccount table
+    3. Generates referral code based on email
+    4. Inserts directly into database (no pre-check)
+    5. Handles unique constraint violations by retrying
+    6. Returns the final successful referral code
+    
+    Args:
+        guest_account_id: UUID of the guest account
+        guest_account_token: Authentication token for the guest account
+        db: Database session
+        
+    Returns:
+        Dictionary with referral code and token expiry info
+        
+    Raises:
+        ValueError: Invalid input parameters or guest account not found
+        RuntimeError: Failed to generate unique code after max retries
+    """
+    # Validate authentication first
+    auth_result = auth_validation_by_token_and_guest_account_id(guest_account_id, guest_account_token, db)
+    
+    if auth_result["auth_status"] != "valid":
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=401, content={"message": "unauthorized"})
+    
+    if not guest_account_id:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=400, content={"message": "guest_account_id is required", "token_expiry_on": auth_result["expiry_on"]})
+    
+    # Validate UUID format
+    try:
+        uuid.UUID(guest_account_id)
+    except ValueError:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=400, content={"message": "Invalid guest_account_id UUID format", "token_expiry_on": auth_result["expiry_on"]})
+    
+    try:
+        # Get email from GuestAccount
+        guest_account = db.query(GuestAccount).filter(
+            GuestAccount.guest_account_id == guest_account_id
+        ).first()
+        
+        if not guest_account:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=404, content={"message": "Guest account not found", "token_expiry_on": auth_result["expiry_on"]})
+        
+        if not guest_account.email:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=400, content={"message": "Guest account email is required", "token_expiry_on": auth_result["expiry_on"]})
+        
+        # Clean email prefix
+        prefix = clean_prefix(guest_account.email)
+        
+        max_retries = 10
+        attempt = 0
+        
+        while attempt < max_retries:
+            attempt += 1
+            
+            # Generate new referral code
+            referral_code = generate_code(prefix)
+            
+            try:
+                # Check if GuestAccountReferral already exists for this guest_account_id
+                existing_referral = db.query(GuestAccountReferral).filter(
+                    GuestAccountReferral.guest_account_id == guest_account_id
+                ).first()
+                
+                if existing_referral:
+                    # Update existing record
+                    existing_referral.referral_code = referral_code
+                    logger.info(f"Referral code updated successfully: {referral_code} for guest {guest_account_id}")
+                else:
+                    # Insert new record
+                    referral_record = GuestAccountReferral(
+                        guest_account_id=guest_account_id,
+                        referral_code=referral_code
+                    )
+                    db.add(referral_record)
+                    logger.info(f"Referral code created successfully: {referral_code} for guest {guest_account_id}")
+                
+                db.commit()
+                
+                from fastapi.responses import JSONResponse
+                return JSONResponse(status_code=200, content={
+                    "message": "success",
+                    "referral_code": referral_code,
+                    "token_expiry_on": auth_result["expiry_on"]
+                })
+                        
+            except IntegrityError as e:
+                # Referral code already exists, retry with new code
+                db.rollback()
+                logger.warning(f"Referral code collision on attempt {attempt}: {referral_code}")
+                if attempt >= max_retries:
+                    from fastapi.responses import JSONResponse
+                    return JSONResponse(status_code=500, content={
+                        "message": "Failed to generate unique referral code after maximum attempts",
+                        "token_expiry_on": auth_result["expiry_on"]
+                    })
+                continue
+                
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Database error on attempt {attempt}: {str(e)}")
+                from fastapi.responses import JSONResponse
+                if "timeout" in str(e).lower():
+                    return JSONResponse(status_code=408, content={"message": "timeout", "token_expiry_on": auth_result["expiry_on"]})
+                else:
+                    return JSONResponse(status_code=500, content={"message": "failed", "token_expiry_on": auth_result["expiry_on"]})
+        
+        # This should never be reached due to the logic above, but included for completeness
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=500, content={
+            "message": "Failed to generate unique referral code after maximum attempts",
+            "token_expiry_on": auth_result["expiry_on"]
+        })
+        
+    except Exception as e:
+        db.rollback()
+        logger.exception("Error creating referral code")
+        from fastapi.responses import JSONResponse
+        if "timeout" in str(e).lower():
+            return JSONResponse(status_code=408, content={"message": "timeout", "token_expiry_on": auth_result["expiry_on"]})
+        else:
+            return JSONResponse(status_code=500, content={"message": "failed", "token_expiry_on": auth_result["expiry_on"]})
+
+def get_referral_code(guest_account_id: str, guest_account_token: str, db: Session) -> dict:
+    """
+    Retrieve existing referral code for a guest account.
+    
+    Args:
+        guest_account_id: UUID of the guest account
+        guest_account_token: Authentication token for the guest account
+        db: Database session
+        
+    Returns:
+        Dictionary with referral code and token expiry info
+        
+    Raises:
+        ValueError: Invalid guest_account_id
+    """
+    # Validate authentication first
+    auth_result = auth_validation_by_token_and_guest_account_id(guest_account_id, guest_account_token, db)
+    
+    if auth_result["auth_status"] != "valid":
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=401, content={"message": "unauthorized"})
+    
+    if not guest_account_id:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=400, content={"message": "guest_account_id is required", "token_expiry_on": auth_result["expiry_on"]})
+    
+    try:
+        uuid.UUID(guest_account_id)
+    except ValueError:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=400, content={"message": "Invalid guest_account_id UUID format", "token_expiry_on": auth_result["expiry_on"]})
+    
+    try:
+        referral = db.query(GuestAccountReferral).filter(
+            GuestAccountReferral.guest_account_id == guest_account_id
+        ).order_by(GuestAccountReferral.created_at.desc()).first()
+        
+        if referral and referral.referral_code:
+            response_data = {
+                "message": "success",
+                "referral_code": referral.referral_code,
+                "referred_by_id": None,
+                "referred_by": None,
+                "token_expiry_on": auth_result["expiry_on"]
+            }
+            
+            # Check if referred_by_id is not null
+            if referral.referred_by_id:
+                # Get the referral code of the referrer
+                referrer = db.query(GuestAccountReferral).filter(
+                    GuestAccountReferral.guest_account_referral_id == referral.referred_by_id
+                ).first()
+                
+                if referrer:
+                    response_data["referred_by_id"] = str(referral.referred_by_id)
+                    response_data["referred_by"] = referrer.referral_code
+            
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=200, content=response_data)
+        else:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=404, content={
+                "message": "No referral code found",
+                "token_expiry_on": auth_result["expiry_on"]
+            })
+            
+    except Exception as e:
+        logger.exception("Error retrieving referral code")
+        from fastapi.responses import JSONResponse
+        if "timeout" in str(e).lower():
+            return JSONResponse(status_code=408, content={"message": "timeout", "token_expiry_on": auth_result["expiry_on"]})
+        else:
+            return JSONResponse(status_code=500, content={"message": "failed", "token_expiry_on": auth_result["expiry_on"]})
+
+def apply_referral_code_by_auth_guest_account(guest_account_id: str, guest_account_token: str, referral_code: str, db: Session) -> dict:
+    """Apply a referral code to an authenticated guest account."""
+    auth_result = auth_validation_by_token_and_guest_account_id(guest_account_id, guest_account_token, db)
+
+    if auth_result["auth_status"] != "valid":
+        return JSONResponse(status_code=401, content={"message": "unauthorized"})
+
+    if not guest_account_id:
+        return JSONResponse(status_code=400, content={"message": "guest_account_id is required", "token_expiry_on": auth_result["expiry_on"]})
+
+    if not referral_code or not referral_code.strip():
+        return JSONResponse(status_code=400, content={"message": "referral_code is required", "token_expiry_on": auth_result["expiry_on"]})
+
+    try:
+        uuid.UUID(guest_account_id)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"message": "Invalid guest_account_id UUID format", "token_expiry_on": auth_result["expiry_on"]})
+
+    try:
+        referred_by = db.query(GuestAccountReferral).filter(
+            GuestAccountReferral.referral_code == referral_code.strip()
+        ).first()
+
+        if not referred_by:
+            return JSONResponse(status_code=404, content={"message": "Referral code is not found.", "token_expiry_on": auth_result["expiry_on"]})
+
+        existing_referral = db.query(GuestAccountReferral).filter(
+            GuestAccountReferral.guest_account_id == guest_account_id
+        ).order_by(GuestAccountReferral.created_at.desc()).first()
+
+        if existing_referral:
+            existing_referral.referred_by_id = referred_by.guest_account_referral_id
+        else:
+            new_referral = GuestAccountReferral(
+                guest_account_id=guest_account_id,
+                referral_code=None,
+                referred_by_id=referred_by.guest_account_referral_id,
+            )
+            db.add(new_referral)
+
+        db.commit()
+
+        return JSONResponse(
+            status_code=200, 
+            content={
+                "message": "success", 
+                "referred_by": referred_by.referral_code,
+                "referred_by_id": str(referred_by.guest_account_referral_id),
+                "token_expiry_on": auth_result["expiry_on"]
+                }
+            )
+    except Exception as e:
+        db.rollback()
+        logger.exception("Error applying referral code")
+        if "timeout" in str(e).lower():
+            return JSONResponse(status_code=408, content={"message": "timeout", "token_expiry_on": auth_result["expiry_on"]})
+        else:
+            return JSONResponse(status_code=500, content={"message": "failed", "token_expiry_on": auth_result["expiry_on"]})
+
+def get_referred_users(guest_account_id: str, guest_account_token: str, sort_by: str, is_desc: bool, page_size: int, page_number: int, db: Session):
+    """Get list of users referred by this guest account with pagination"""
+    auth_result = auth_validation_by_token_and_guest_account_id(guest_account_id, guest_account_token, db)
+
+    if auth_result["auth_status"] != "valid":
+        return JSONResponse(status_code=401, content={"message": "unauthorized"})
+
+    try:
+        gar = db.query(GuestAccountReferral).filter(
+            GuestAccountReferral.guest_account_id == guest_account_id
+        ).first()
+
+        if not gar:
+            return JSONResponse(status_code=200, content={
+                "token_expiry_on": auth_result["expiry_on"],
+                "data_list": [],
+                "total_count": 0,
+                "is_has_more": False,
+                "current_page_number": page_number
+            })
+
+        total_count = db.query(GuestAccountReferral).filter(
+            GuestAccountReferral.referred_by_id == gar.guest_account_referral_id
+        ).count()
+
+        sort_column = getattr(GuestAccountReferral, sort_by, GuestAccountReferral.created_at)
+        query = db.query(
+            GuestAccountReferral.created_at,
+            GuestAccount.email
+        ).join(
+            GuestAccount, GuestAccountReferral.guest_account_id == GuestAccount.guest_account_id
+        ).filter(
+            GuestAccountReferral.referred_by_id == gar.guest_account_referral_id
+        )
+
+        if is_desc:
+            query = query.order_by(sort_column.desc())
+        else:
+            query = query.order_by(sort_column.asc())
+
+        results = query.offset((page_number - 1) * page_size).limit(page_size).all()
+
+        data_list = [
+            {
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "email": row.email
+            }
+            for row in results
+        ]
+
+        is_has_more = (page_number * page_size) < total_count
+
+        return JSONResponse(status_code=200, content={
+            "token_expiry_on": auth_result["expiry_on"],
+            "data_list": data_list,
+            "total_count": total_count,
+            "is_has_more": is_has_more,
+            "current_page_number": page_number
+        })
+    except Exception as e:
+        logger.exception("Error retrieving referred users")
+        if "timeout" in str(e).lower():
+            return JSONResponse(status_code=408, content={"message": "timeout", "token_expiry_on": auth_result["expiry_on"]})
+        else:
+            return JSONResponse(status_code=500, content={"message": "failed", "token_expiry_on": auth_result["expiry_on"]})
+
+def _get_referral_code_internal(guest_account_id: str, db: Session) -> str:
+    """
+    Internal helper function to retrieve referral code without authentication.
+    Used by get_or_create_referral_code after authentication is already validated.
+    
+    Args:
+        guest_account_id: UUID of the guest account
+        db: Database session
+        
+    Returns:
+        Referral code if exists, None otherwise
+    """
+    referral = db.query(GuestAccountReferral).filter(
+        GuestAccountReferral.guest_account_id == guest_account_id
+    ).order_by(GuestAccountReferral.created_at.desc()).first()
+    
+    return referral.referral_code if referral else None
+
+def get_or_create_referral_code(guest_account_id: str, guest_account_token: str, db: Session) -> dict:
+    """
+    Get existing referral code or create new one if doesn't exist.
+    
+    Args:
+        guest_account_id: UUID of the guest account
+        guest_account_token: Authentication token for the guest account
+        db: Database session
+        
+    Returns:
+        Dictionary with referral code and token expiry info
+    """
+    # Validate authentication first
+    auth_result = auth_validation_by_token_and_guest_account_id(guest_account_id, guest_account_token, db)
+    
+    if auth_result["auth_status"] != "valid":
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=401, content={"message": "unauthorized"})
+    
+    # Try to get existing referral code first
+    existing_code = _get_referral_code_internal(guest_account_id, db)
+    
+    if existing_code:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=200, content={
+            "message": "success",
+            "referral_code": existing_code,
+            "token_expiry_on": auth_result["expiry_on"]
+        })
+    
+    # Create new referral code if none exists
+    return create_referral_code(guest_account_id, guest_account_token, db)
