@@ -715,7 +715,7 @@ def invite_friends_with_referral_code(guest_account_id: str, guest_account_token
     <h2 style="color: #2c3e50;">You've Been Invited by {sender_email} to Enigmatig KYC &amp; AML</h2>
     <p>Hi,</p>
     <p>You have been personally invited to join <strong>Enigmatig KYC &amp; AML</strong> &mdash; a powerful platform for KYC and AML compliance checks.</p>
-    <p>Use the referral code below when signing up:</p>
+    <p>Use the referral code below when signing up to get a special offer:</p>
     <div style="background-color: #f4f4f4; border-radius: 6px; padding: 12px 20px; display: inline-block; margin: 10px 0;">
         <span style="font-size: 22px; font-weight: bold; letter-spacing: 2px; color: #2c3e50;">{referral_code}</span>
     </div>
