@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, DateTime, Integer, Numeric, CheckConstraint, Boolean, ForeignKey
+from sqlalchemy import Column, String, Text, DateTime, Integer, Numeric, CheckConstraint, Boolean, ForeignKey, Sequence
 from sqlalchemy.sql import func
 from db import Base
 from sqlalchemy.dialects.postgresql import UUID
@@ -179,6 +179,42 @@ class GuestAccountReferral(Base):
     referral_code = Column(String(12), unique=True, nullable=True)
     referred_by_id = Column(UUID(as_uuid=True), ForeignKey("guest_account_referrals.guest_account_referral_id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+class CreditSourceType(Base):
+    __tablename__ = "credit_source_types"
+    credit_source_type_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_type_id = Column(Integer, Sequence("credit_source_type_seq"), unique=True, nullable=False)
+    source_type_name = Column(String(25), nullable=False)
+    source_type_description = Column(Text, nullable=True)
+    max_credit_count = Column(Integer)
+    credit_amount = Column(Numeric(18, 2))
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_by = Column(UUID(as_uuid=True), nullable=True)
+    start_date = Column(DateTime(timezone=True), nullable=False)
+    end_date = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+    updated_by = Column(UUID(as_uuid=True), nullable=True)
+    is_credit = Column(Boolean)
+    is_activated = Column(Boolean)
+
+class GuestAccountCredit(Base):
+    __tablename__ = "guest_account_credits"
+    guest_account_credit_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    guest_account_id = Column(UUID(as_uuid=True), ForeignKey("guest_accounts.guest_account_id"), nullable=False)
+    reference_id = Column(UUID(as_uuid=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    credit_source_type_id = Column(UUID(as_uuid=True), ForeignKey("credit_source_types.credit_source_type_id"), nullable=False)
+    credit_amount = Column(Numeric(18, 2), nullable=False)
+    debit_amount = Column(Numeric(18, 2), nullable=False)
+    balance_amount = Column(Numeric(18, 2), nullable=False)
+    balance_signature = Column(Text, nullable=False)
+    description = Column(Text)
+    __table_args__ = (
+        CheckConstraint(
+            "(credit_amount > 0 AND debit_amount = 0) OR (credit_amount = 0 AND debit_amount > 0)",
+            name="chk_credit_debit_exclusive"
+        ),
+    )
 
 class AdminUser(Base):
     __tablename__ = "admin_users"

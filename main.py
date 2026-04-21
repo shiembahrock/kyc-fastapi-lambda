@@ -60,7 +60,7 @@ def on_startup():
     if env in ("local", "dev"):
         Base.metadata.create_all(bind=engine)
     try:
-        if env in ("local", "dev") and engine.dialect.name == "postgresql":
+        if engine.dialect.name == "postgresql":
             with engine.connect() as conn:
                 # Database migrations...
                 q = text("SELECT data_type FROM information_schema.columns WHERE table_name='orders' AND column_name='order_id'")
@@ -68,13 +68,13 @@ def on_startup():
                 if res and res.lower() != "uuid":
                     conn.execute(text("ALTER TABLE orders ALTER COLUMN order_id TYPE uuid USING order_id::uuid"))
                     conn.commit()
-                
+
                 q = text("SELECT column_name FROM information_schema.columns WHERE table_name='muinmos_settings' AND column_name='base_api_url'")
                 res = conn.execute(q).scalar()
                 if not res:
                     conn.execute(text("ALTER TABLE muinmos_settings ADD COLUMN base_api_url VARCHAR NOT NULL DEFAULT ''"))
                     conn.commit()
-                
+
                 q = text("SELECT column_name FROM information_schema.columns WHERE table_name='service_prices' AND column_name='is_popular'")
                 res = conn.execute(q).scalar()
                 if not res:
@@ -86,12 +86,37 @@ def on_startup():
                 if not res:
                     conn.execute(text("ALTER TABLE service_prices ADD COLUMN kyc_profile_id VARCHAR(50)"))
                     conn.commit()
-                
+
                 q = text("SELECT character_maximum_length FROM information_schema.columns WHERE table_name='guest_login_sessions' AND column_name='token'")
                 res = conn.execute(q).scalar()
                 if res and res < 500:
                     conn.execute(text("ALTER TABLE guest_login_sessions ALTER COLUMN token TYPE VARCHAR(500)"))
                     conn.commit()
+
+                # Seed CreditSourceType default rows
+                seed_rows = [
+                    ("Sign Up Referral",        1,  "2.00", True,  True),
+                    ("New Referral",            1,  "1.00", True,  True),
+                    ("Transaction by Referral", 5,  "3.00", True,  True),
+                    ("Use for Transaction",     -1, "0.00", False, True),
+                ]
+                for name, max_count, amount, is_credit, is_activated in seed_rows:
+                    exists = conn.execute(
+                        text("SELECT 1 FROM credit_source_types WHERE source_type_name = :n"),
+                        {"n": name}
+                    ).scalar()
+                    if not exists:
+                        conn.execute(
+                            text("""
+                                INSERT INTO credit_source_types
+                                (credit_source_type_id, source_type_id, source_type_name, max_credit_count, credit_amount,
+                                 created_at, start_date, end_date, is_credit, is_activated)
+                                VALUES (gen_random_uuid(), nextval('credit_source_type_seq'), :n, :mc, :ca, now(), now(),
+                                        now() + interval '50 years', :ic, :ia)
+                            """),
+                            {"n": name, "mc": max_count, "ca": amount, "ic": is_credit, "ia": is_activated}
+                        )
+                        conn.commit()
     except Exception:
         pass
 
