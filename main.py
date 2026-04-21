@@ -95,12 +95,16 @@ def on_startup():
 
                 # Seed CreditSourceType default rows
                 seed_rows = [
-                    ("Sign Up Referral",        1,  "2.00", True,  True),
-                    ("New Referral",            1,  "1.00", True,  True),
-                    ("Transaction by Referral", 5,  "3.00", True,  True),
-                    ("Use for Transaction",     -1, "0.00", False, True),
+                    ("Sign Up Referral",        "New User registered within Referral Code.",                                                          1,  "2.00", True,  True),
+                    ("New Referral",            "Existing User applied Referral Code.",                                                               1,  "1.00", True,  True),
+                    ("Transaction by Referral", "New transaction by Referral Member.",                                                                5,  "3.00", True,  True),
+                    ("Use for Transaction",     "Debit transaction used by Credit Owner for transaction. Note : max_credit_count = -1 means infinity.", -1, "0.00", False, True),
                 ]
-                for name, max_count, amount, is_credit, is_activated in seed_rows:
+                # Ensure source_type_id column is SERIAL (auto-increment) in production
+                conn.execute(text("CREATE SEQUENCE IF NOT EXISTS credit_source_type_seq"))
+                conn.execute(text("ALTER TABLE credit_source_types ALTER COLUMN source_type_id SET DEFAULT nextval('credit_source_type_seq')"))
+                conn.commit()
+                for name, description, max_count, amount, is_credit, is_activated in seed_rows:
                     exists = conn.execute(
                         text("SELECT 1 FROM credit_source_types WHERE source_type_name = :n"),
                         {"n": name}
@@ -109,12 +113,12 @@ def on_startup():
                         conn.execute(
                             text("""
                                 INSERT INTO credit_source_types
-                                (credit_source_type_id, source_type_id, source_type_name, max_credit_count, credit_amount,
+                                (credit_source_type_id, source_type_name, source_type_description, max_credit_count, credit_amount,
                                  created_at, start_date, end_date, is_credit, is_activated)
-                                VALUES (gen_random_uuid(), nextval('credit_source_type_seq'), :n, :mc, :ca, now(), now(),
+                                VALUES (gen_random_uuid(), :n, :desc, :mc, :ca, now(), now(),
                                         now() + interval '50 years', :ic, :ia)
                             """),
-                            {"n": name, "mc": max_count, "ca": amount, "ic": is_credit, "ia": is_activated}
+                            {"n": name, "desc": description, "mc": max_count, "ca": amount, "ic": is_credit, "ia": is_activated}
                         )
                         conn.commit()
     except Exception:

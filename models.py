@@ -183,7 +183,7 @@ class GuestAccountReferral(Base):
 class CreditSourceType(Base):
     __tablename__ = "credit_source_types"
     credit_source_type_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    source_type_id = Column(Integer, Sequence("credit_source_type_seq"), unique=True, nullable=False)
+    source_type_id = Column(Integer, Sequence("credit_source_type_seq"), unique=True, nullable=True)
     source_type_name = Column(String(25), nullable=False)
     source_type_description = Column(Text, nullable=True)
     max_credit_count = Column(Integer)
