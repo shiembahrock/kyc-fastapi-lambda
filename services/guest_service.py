@@ -14,7 +14,9 @@ from models import (
     ServicePrice, SearchHistory, OrderAssessment, GuestAccountReferral
 )
 from services.auth_service import auth_validation_by_token_and_guest_account_id
+from services.guest_account_credit_service import insert_guest_account_credit_transaction
 from utils.lambda_client import lambda_client
+from decimal import Decimal
 
 WEBHOOK_TARGET_LAMBDA_ARN = os.getenv("WEBHOOK_TARGET_LAMBDA_ARN", "KYCFastAPIFunctionExternal")
 
@@ -584,7 +586,7 @@ def get_referral_code(guest_account_id: str, guest_account_token: str, db: Sessi
             GuestAccountReferral.guest_account_id == guest_account_id
         ).order_by(GuestAccountReferral.created_at.desc()).first()
         
-        if referral and referral.referral_code:
+        if referral or referral.referral_code:
             response_data = {
                 "message": "success",
                 "referral_code": referral.referral_code,
@@ -653,6 +655,14 @@ def apply_referral_code_by_auth_guest_account(guest_account_id: str, guest_accou
 
         if existing_referral:
             existing_referral.referred_by_id = referred_by.guest_account_referral_id
+            db.commit()
+            insert_guest_account_credit_transaction(
+                referred_by.guest_account_id,
+                existing_referral.guest_account_referral_id,
+                2,
+                db,
+                Decimal("0.00")
+            )
         else:
             new_referral = GuestAccountReferral(
                 guest_account_id=guest_account_id,
@@ -660,8 +670,15 @@ def apply_referral_code_by_auth_guest_account(guest_account_id: str, guest_accou
                 referred_by_id=referred_by.guest_account_referral_id,
             )
             db.add(new_referral)
-
-        db.commit()
+            db.flush()
+            insert_guest_account_credit_transaction(
+                referred_by.guest_account_id,
+                new_referral.guest_account_referral_id,
+                2,
+                db,
+                Decimal("0.00")
+            )
+            db.commit()
 
         return JSONResponse(
             status_code=200, 

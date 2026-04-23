@@ -15,6 +15,8 @@ from models import (
     GuestAccountReferral,
 )
 from utils.lambda_client import lambda_client
+from services.guest_account_credit_service import insert_guest_account_credit_transaction
+from decimal import Decimal
 import json as _json
 
 JWT_SECRET = os.getenv("JWT_SECRET", "")
@@ -235,6 +237,14 @@ def register_account(
                 referred_by_id=referred_by.guest_account_referral_id,
             )
             db.add(guest_referral)
+            db.flush()
+            insert_guest_account_credit_transaction(
+                referred_by.guest_account_id,
+                guest_referral.guest_account_referral_id,
+                1,
+                db,
+                Decimal("0.00")
+            )
 
         db.commit()
 
