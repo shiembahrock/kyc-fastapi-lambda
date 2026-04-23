@@ -11,7 +11,8 @@ from fastapi.responses import JSONResponse
 
 from models import (
     GuestAccount, GuestAccountNotificationSetting, OrderPayment, 
-    ServicePrice, SearchHistory, OrderAssessment, GuestAccountReferral
+    ServicePrice, SearchHistory, OrderAssessment, GuestAccountReferral,
+    GuestAccountCredit, CreditSourceType
 )
 from services.auth_service import auth_validation_by_token_and_guest_account_id
 from services.guest_account_credit_service import insert_guest_account_credit_transaction
@@ -807,9 +808,14 @@ def get_referred_users(guest_account_id: str, guest_account_token: str, sort_by:
         sort_column = getattr(GuestAccountReferral, sort_by, GuestAccountReferral.created_at)
         query = db.query(
             GuestAccountReferral.created_at,
-            GuestAccount.email
+            GuestAccount.email,
+            CreditSourceType.source_type_name
         ).join(
             GuestAccount, GuestAccountReferral.guest_account_id == GuestAccount.guest_account_id
+        ).outerjoin(
+            GuestAccountCredit, GuestAccountReferral.guest_account_referral_id == GuestAccountCredit.reference_id
+        ).outerjoin(
+            CreditSourceType, GuestAccountCredit.credit_source_type_id == CreditSourceType.credit_source_type_id
         ).filter(
             GuestAccountReferral.referred_by_id == gar.guest_account_referral_id
         )
@@ -824,7 +830,8 @@ def get_referred_users(guest_account_id: str, guest_account_token: str, sort_by:
         data_list = [
             {
                 "created_at": row.created_at.isoformat() if row.created_at else None,
-                "email": row.email
+                "email": row.email,
+                "source_type_name": row.source_type_name
             }
             for row in results
         ]
