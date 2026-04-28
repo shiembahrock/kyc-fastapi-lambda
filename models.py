@@ -216,6 +216,22 @@ class GuestAccountCredit(Base):
         ),
     )
 
+class Discount(Base):
+    __tablename__ = "discounts"
+    discount_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("admin_users.admin_user_id"), nullable=True)
+    discount_name = Column(String(50), nullable=False)
+    discount_description = Column(Text, nullable=True)
+    discount_type = Column(Integer, nullable=False)
+    discount_category = Column(Integer, nullable=False)
+    reference_id = Column(UUID(as_uuid=True), nullable=True)
+    discount_value = Column(Numeric(18, 2), nullable=False)
+    start_date = Column(DateTime(timezone=True), nullable=False)
+    end_date = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+    updated_by = Column(UUID(as_uuid=True), nullable=True)
+
 class AdminUser(Base):
     __tablename__ = "admin_users"
     admin_user_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

@@ -92,7 +92,7 @@ def on_startup():
                 if res and res < 500:
                     conn.execute(text("ALTER TABLE guest_login_sessions ALTER COLUMN token TYPE VARCHAR(500)"))
                     conn.commit()
-
+                
                 # Seed CreditSourceType default rows
                 seed_rows = [
                     ("Sign Up Referral",        "New User registered within Referral Code.",                                                          1,  "2.00", True,  True),
