@@ -54,6 +54,7 @@ class ServicePrice(Base):
     search_number = Column(Integer, nullable=True)
     is_popular = Column(Boolean, nullable=False, default=False)
     kyc_profile_id = Column(String(50))
+    stripe_product_id = Column(String(50), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     __table_args__ = (
         CheckConstraint("price >= -100000000000 AND price <= 100000000000", name="chk_service_price_bounds"),

@@ -87,6 +87,12 @@ def on_startup():
                     conn.execute(text("ALTER TABLE service_prices ADD COLUMN kyc_profile_id VARCHAR(50)"))
                     conn.commit()
 
+                q = text("SELECT column_name FROM information_schema.columns WHERE table_name='service_prices' AND column_name='stripe_product_id'")
+                res = conn.execute(q).scalar()
+                if not res:
+                    conn.execute(text("ALTER TABLE service_prices ADD COLUMN stripe_product_id VARCHAR(50)"))
+                    conn.commit()
+
                 q = text("SELECT character_maximum_length FROM information_schema.columns WHERE table_name='guest_login_sessions' AND column_name='token'")
                 res = conn.execute(q).scalar()
                 if res and res < 500:

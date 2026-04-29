@@ -208,7 +208,7 @@ def checkout_start(email: str, first_name: str, last_name: str, company_name: st
     ss = db.query(StripeSetting).order_by(StripeSetting.stripe_setting_id.desc()).first()
     amount_for_stripe = int(round(price * 100))
     sp = db.query(ServicePrice).filter(ServicePrice.service_price_id == service_id).first()
-    product_name = sp.service_name if sp else "Service"
+    product_name = sp.stripe_product_id if (sp and sp.stripe_product_id) else (sp.service_name if sp else "Service")
     
     form = {
         "success_url": success_url + order_code,
