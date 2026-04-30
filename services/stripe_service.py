@@ -208,7 +208,7 @@ def checkout_start(email: str, first_name: str, last_name: str, company_name: st
     ss = db.query(StripeSetting).order_by(StripeSetting.stripe_setting_id.desc()).first()
     amount_for_stripe = int(round(price * 100))
     sp = db.query(ServicePrice).filter(ServicePrice.service_price_id == service_id).first()
-    product_name = sp.stripe_product_id if (sp and sp.stripe_product_id) else (sp.service_name if sp else "Service")
+    product_name = sp.service_name if sp else "Service"
     stripe_product_id = sp.stripe_product_id if (sp and sp.stripe_product_id) else None
     
     form = {
@@ -219,7 +219,6 @@ def checkout_start(email: str, first_name: str, last_name: str, company_name: st
         "payment_method_types[1]": "link",
         "payment_method_types[2]": "paynow",
         "line_items[0][price_data][currency]": currency_code,
-        "line_items[0][price_data][product_data][name]": product_name,
         "line_items[0][price_data][unit_amount]": str(amount_for_stripe),
         "line_items[0][quantity]": "1",
         "customer_email": email,
@@ -228,6 +227,8 @@ def checkout_start(email: str, first_name: str, last_name: str, company_name: st
     }
     if stripe_product_id:
         form["line_items[0][price_data][product]"] = stripe_product_id
+    else:
+        form["line_items[0][price_data][product_data][name]"] = product_name
 
     if WEBHOOK_TARGET_LAMBDA_ARN:
         lambda_payload = {"action": "create_checkout_session", "payload": form}
