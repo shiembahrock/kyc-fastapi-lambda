@@ -209,6 +209,7 @@ def checkout_start(email: str, first_name: str, last_name: str, company_name: st
     amount_for_stripe = int(round(price * 100))
     sp = db.query(ServicePrice).filter(ServicePrice.service_price_id == service_id).first()
     product_name = sp.stripe_product_id if (sp and sp.stripe_product_id) else (sp.service_name if sp else "Service")
+    stripe_product_id = sp.stripe_product_id if (sp and sp.stripe_product_id) else None
     
     form = {
         "success_url": success_url + order_code,
@@ -225,6 +226,8 @@ def checkout_start(email: str, first_name: str, last_name: str, company_name: st
         "metadata[internal_order_payment_id]": str(op.order_payment_id),
         "payment_intent_data[metadata][internal_order_payment_id]": str(op.order_payment_id),
     }
+    if stripe_product_id:
+        form["line_items[0][price_data][product]"] = stripe_product_id
 
     if WEBHOOK_TARGET_LAMBDA_ARN:
         lambda_payload = {"action": "create_checkout_session", "payload": form}
